@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>spout</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a0a;
+      color: #e0e0e0;
+      font-family: -apple-system, system-ui, 'Segoe UI', sans-serif;
+      padding: 24px;
+      max-width: 800px;
+      margin: 0 auto;
+    }
+    h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; color: #5ac8e2; }
+    .subtitle { color: #666; font-size: 13px; margin-bottom: 24px; }
+
+    .section-label {
+      font-size: 11px;
+      color: #5ac8e2;
+      font-family: 'SF Mono', monospace;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      text-transform: lowercase;
+      margin-top: 24px;
+      margin-bottom: 8px;
+      padding-left: 4px;
+    }
+    .section-label:first-of-type { margin-top: 0; }
+    .section-count {
+      color: #555;
+      font-weight: 400;
+      margin-left: 6px;
+    }
+
+    .runs { display: flex; flex-direction: column; gap: 8px; }
+
+    .run {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 16px;
+      background: #141414;
+      border: 1px solid #222;
+      border-radius: 8px;
+      text-decoration: none;
+      color: inherit;
+      transition: border-color 0.15s;
+    }
+    .run:hover { border-color: #444; }
+
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    /* Status dot colors - must match CLI color.go statusText/statusDot. */
+    .dot-green     { background: #22c55e; box-shadow: 0 0 6px #22c55e88; } /* streaming */
+    .dot-yellow    { background: #eab308; box-shadow: 0 0 6px #eab30888; } /* awaiting  */
+    .dot-darkgreen { background: #166534; }                                /* success   */
+    .dot-red       { background: #b91c1c; }                                /* error     */
+    .dot-gray      { background: #555; }                                   /* killed    */
+
+    /* Hover popup for status dots. */
+    .dot-wrap {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      flex-shrink: 0;
+    }
+    .dot-tip {
+      position: absolute;
+      bottom: calc(100% + 8px);
+      left: 50%;
+      transform: translateX(-50%);
+      background: #1a1a1a;
+      border: 1px solid #333;
+      color: #ddd;
+      font-family: -apple-system, system-ui, sans-serif;
+      font-size: 11px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      white-space: nowrap;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.15s;
+      z-index: 10;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    }
+    .dot-tip-label { font-weight: 600; }
+    .dot-tip-desc { color: #888; font-size: 10px; margin-top: 2px; }
+    .dot-tip::after {
+      content: '';
+      position: absolute;
+      top: 100%;
+      left: 50%;
+      transform: translateX(-50%);
+      border: 4px solid transparent;
+      border-top-color: #333;
+    }
+    .dot-wrap:hover .dot-tip { opacity: 1; }
+
+    .run-info { flex: 1; min-width: 0; }
+    .run-name {
+      font-family: 'SF Mono', 'Cascadia Code', monospace;
+      font-size: 14px;
+      font-weight: 500;
+    }
+    .run-meta {
+      font-size: 12px;
+      color: #666;
+      margin-top: 2px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .run-mode {
+      font-family: 'SF Mono', 'Cascadia Code', monospace;
+      font-size: 10px;
+      background: #1a1a1a;
+      padding: 1px 5px;
+      border-radius: 3px;
+      color: #666;
+    }
+    .run-time {
+      color: #555;
+      font-size: 11px;
+      cursor: default;
+    }
+    .run-bytes {
+      font-family: 'SF Mono', monospace;
+      font-size: 12px;
+      color: #555;
+      flex-shrink: 0;
+    }
+
+    .group-label {
+      font-size: 11px;
+      color: #444;
+      font-family: 'SF Mono', monospace;
+      margin-top: 20px;
+      margin-bottom: 6px;
+      padding-left: 4px;
+    }
+    .group-label:first-child { margin-top: 0; }
+
+    .empty {
+      text-align: center;
+      color: #555;
+      padding: 48px 0;
+      font-size: 14px;
+    }
+    .empty code {
+      background: #1a1a1a;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <h1>spout</h1>
+  <p class="subtitle">runs</p>
+  <div class="runs" id="runs"></div>
+
+  <script>
+    function humanDuration(ms) {
+      const m = Math.floor(ms / 60000);
+      if (m < 1) return '<1m';
+      if (m < 60) return m + 'm';
+      if (m < 24 * 60) {
+        const h = Math.floor(m / 60);
+        const mins = m % 60;
+        return mins === 0 ? h + 'h' : h + 'h' + mins + 'm';
+      }
+      const d = Math.floor(m / (24 * 60));
+      const h = Math.floor((m % (24 * 60)) / 60);
+      return h === 0 ? d + 'd' : d + 'd' + h + 'h';
+    }
+
+    function humanTimestamp(ms) {
+      const d = new Date(ms);
+      const now = new Date();
+      const sameDay = d.toDateString() === now.toDateString();
+      const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
+      const isYesterday = d.toDateString() === yesterday.toDateString();
+      // "2:03pm" with no space before am/pm
+      const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+        .toLowerCase().replace(/\s+/g, '');
+      if (sameDay) return 'Today @ ' + time;
+      if (isYesterday) return 'Yesterday @ ' + time;
+      const daysAgo = Math.floor((now - d) / (1000 * 60 * 60 * 24));
+      if (daysAgo < 7) {
+        const day = d.toLocaleDateString([], { weekday: 'short' });
+        return day + ' @ ' + time;
+      }
+      return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' @ ' + time;
+    }
+
+    function displayName(name) {
+      const i = name.lastIndexOf('-');
+      if (i > 0) return name.substring(0, i);
+      return name;
+    }
+
+    // Single source of truth for status label + color + tooltip.
+    // Must match cmd/spout/cmd/color.go statusText() and session.html.
+    function statusInfo(status) {
+      switch (status) {
+        case 'streaming': return { label: 'streaming',         color: 'green',     desc: 'receiving data right now' };
+        case 'awaiting':  return { label: 'awaiting input',    color: 'yellow',    desc: 'shell is idle at a prompt' };
+        case 'success':   return { label: 'completed',         color: 'darkgreen', desc: 'command exited cleanly (0)' };
+        case 'error':     return { label: 'exited with error', color: 'red',       desc: 'command exited non-zero' };
+        case 'killed':    return { label: 'stopped by you',    color: 'gray',      desc: 'session ended before the command finished (kill / close terminal)' };
+        default:          return { label: status || 'unknown', color: 'gray',      desc: '' };
+      }
+    }
+
+    function modeLabel(s) {
+      return s.mode === 'run' ? 'run' : 'pipe';
+    }
+
+    // Must match isActive() in cmd/spout/cmd/status.go.
+    function isActive(status) {
+      return status === 'streaming' || status === 'awaiting';
+    }
+
+    function renderRun(s) {
+      const info = statusInfo(s.status);
+      return `
+        <a class="run" href="/r/${s.name}">
+          <span class="dot-wrap">
+            <span class="dot dot-${info.color}"></span>
+            <span class="dot-tip">
+              <div class="dot-tip-label">${info.label}</div>
+              ${info.desc ? `<div class="dot-tip-desc">${info.desc}</div>` : ''}
+            </span>
+          </span>
+          <span class="run-info">
+            <div class="run-name">${displayName(s.name)}</div>
+            <div class="run-meta">
+              <span class="run-mode">${modeLabel(s)}</span>
+              <span class="run-time" title="${s.started_at}">${humanTimestamp(s.started_ms)}</span>
+            </div>
+          </span>
+          <span class="run-bytes">${humanDuration(s.duration_ms)}</span>
+        </a>`;
+    }
+
+    async function load() {
+      const el = document.getElementById('runs');
+      try {
+        const res = await fetch('/api/runs');
+        const runs = await res.json();
+
+        if (!runs || runs.length === 0) {
+          el.innerHTML = '<div class="empty">No runs yet.<br><br>Start one with <code>command | spout</code> or <code>spout run command</code></div>';
+          return;
+        }
+
+        const active = runs.filter(r => isActive(r.status));
+        const ended = runs.filter(r => !isActive(r.status));
+
+        let html = '';
+        if (active.length > 0) {
+          html += `<div class="section-label">active<span class="section-count">${active.length}</span></div>`;
+          html += active.map(renderRun).join('');
+        }
+        if (ended.length > 0) {
+          html += `<div class="section-label">ended<span class="section-count">${ended.length}</span></div>`;
+          html += ended.map(renderRun).join('');
+        }
+        el.innerHTML = html;
+      } catch (e) {
+        el.innerHTML = '<div class="empty">Failed to load runs.</div>';
+      }
+    }
+
+    load();
+    setInterval(load, 2000);
+  </script>
+</body>
+</html>

@@ -1,0 +1,41 @@
+---
+description: Spout project context and architecture
+globs:
+alwaysApply: true
+---
+
+# Spout Project Context
+
+Go monorepo. Two binaries sharing `internal/` packages:
+- `cmd/spout/` - CLI (pipe mode, run mode, session management)
+- `cmd/server/` - standalone server (same code as `spout server`)
+
+Server is the same binary everywhere (local, self-hosted, spout.sh).
+Tiers are encryption modes, not different products.
+
+## Architecture
+
+```
+CLI ──WebSocket──→ Server ──WebSocket──→ Browser (xterm.js)
+```
+
+- CLI reads raw bytes, batches (16ms / 64KB), sends binary WebSocket
+- Server stores in memory + file, broadcasts to viewer WebSocket channels
+- Browser renders with xterm.js (CDN, no parsing needed)
+- Two WS libraries: coder/websocket (CLI, net/http) + fasthttp/websocket (server, Fiber)
+
+## Key packages
+
+- `internal/server/` - Fiber app, routes, WebSocket handlers
+- `internal/store/` - Session struct, in-memory + file persistence, broadcast
+- `internal/names/` - word-xxxx name generation
+
+## Conventions
+
+- Wrap errors: `fmt.Errorf("doing X: %w", err)`
+- Table-driven tests, stdlib `testing`
+- Copy fasthttp params before WebSocket upgrade (buffer reuse)
+- No CGo, no JS build step
+- `web/static/` → sync to `internal/server/static/` after edits
+
+Read CLAUDE.md for full conventions. Read DEVELOPMENT.md for current state.

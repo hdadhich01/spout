@@ -1,0 +1,56 @@
+---
+description: Frontend conventions for Spout dashboard
+globs: "web/**"
+alwaysApply: false
+---
+
+# Frontend Conventions
+
+Dashboard lives in `web/static/` (source) and `internal/server/static/`
+(embedded). After editing web/static/, sync:
+```bash
+cp web/static/*.html internal/server/static/
+```
+Then rebuild the Go binary to pick up changes.
+
+## Stack
+
+- **xterm.js** (CDN) - full terminal emulation, handles all ANSI/colors/cursor
+- **Vanilla JS** - no framework, no build step
+- No HTMX, no Tailwind, no Chart.js (removed - xterm.js handles rendering)
+
+## Pages
+
+- `index.html` - run list dashboard. Polls `/api/runs` every 2s.
+- `session.html` - terminal viewer. WebSocket to `/ws/:name`.
+
+## Status Colors (Consistent Everywhere)
+
+- **Green** = streaming (command actively producing output, >50 bytes/sec)
+- **Yellow** = awaiting (session active but idle >1s, waiting for input)
+- **Red** = ended (session closed, command finished or killed)
+
+## xterm.js Setup
+
+```js
+const term = new Terminal({
+  disableStdin: true,   // read-only viewer
+  convertEol: true,     // handle \n without \r
+  scrollback: 50000,
+});
+```
+
+Loaded from CDN (jsdelivr). Addons: fit (responsive), web-links (clickable URLs).
+
+## WebSocket Protocol
+
+- Binary messages: raw terminal bytes → `term.write(data)`
+- Text messages: JSON status updates → `{"status":"ended"}`
+- Burst detection: track bytes/sec in 1-second windows to distinguish
+  real output (streaming) from keystroke echoes (awaiting)
+
+## Encryption (Tier 2, Not Built Yet)
+
+Browser will decrypt with WebCrypto API using key from URL fragment
+(`#key=base64...`). Fragment never sent to server. Decrypt each chunk
+before writing to xterm.js. No JS crypto libraries.

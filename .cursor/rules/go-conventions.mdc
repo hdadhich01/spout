@@ -1,0 +1,53 @@
+---
+description: Go coding conventions for Spout
+globs: "**/*.go"
+alwaysApply: false
+---
+
+# Go Conventions
+
+## Errors
+
+Always wrap with context:
+```go
+if err != nil {
+    return fmt.Errorf("parsing metric from line %d: %w", lineNum, err)
+}
+```
+Use `errors.Is`/`errors.As` for sentinels.
+
+## Fiber Handlers
+
+Return errors; use error handler middleware. Keep handlers thin.
+```go
+func handleGetRun(c fiber.Ctx) error {
+    sess := store.Get(c.Params("name"))
+    if sess == nil {
+        return c.Status(404).SendString("not found")
+    }
+    return c.JSON(sessionToInfo(sess))
+}
+```
+
+## FastHTTP WebSocket Gotcha
+
+Fiber uses fasthttp which reuses request buffers. After WebSocket upgrade,
+`c.Params()` and `c.Query()` return garbage. Always copy BEFORE `Upgrade()`:
+```go
+name := string(append([]byte{}, c.Params("name")...))
+// then use `name` inside the Upgrade callback
+```
+
+## Packages
+
+- One concern per package, no circular imports
+- Default unexported. Short receivers (`s` for Session, `p` for Parser)
+
+## Testing
+
+- Table-driven, stdlib `testing`
+- Test file next to source: `parser.go` → `parser_test.go`
+
+## No CGo
+
+Hard constraint for cross-compilation.

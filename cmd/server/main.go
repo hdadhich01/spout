@@ -3,8 +3,6 @@ package main
 import (
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 
 	"github.com/hdadhich01/spout/internal/config"
 	"github.com/hdadhich01/spout/internal/server"
@@ -12,7 +10,7 @@ import (
 )
 
 func main() {
-	dir := filepath.Join(configDir(), "sessions")
+	dir := config.DefaultStorageDir()
 	st, err := store.New(dir)
 	if err != nil {
 		log.Fatalf("opening store: %v", err)
@@ -21,14 +19,6 @@ func main() {
 	port := config.DefaultLocalPort
 	app := server.New(st)
 	fmt.Printf("spout server listening on http://%s\n", config.DefaultLocalAddr())
-	fmt.Printf("sessions stored in %s\n", dir)
+	fmt.Printf("storage at %s\n", dir)
 	log.Fatal(app.Listen(":" + port))
-}
-
-func configDir() string {
-	if d, err := os.UserConfigDir(); err == nil {
-		return filepath.Join(d, "spout")
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "spout")
 }

@@ -32,9 +32,8 @@ To create or edit configs:
 		yamls, envs := config.LoadedFiles()
 		sysDir := filepath.Dir(config.SystemPath())
 
-		// --- loaded: single tree, indented by depth, global at bottom ---
-		fmt.Fprintf(stderr, "\n  %s\n", "all configs merged; deeper files take precedence")
-		section("loaded")
+		// --- sources: the tree of yaml + .env files that got merged ---
+		section("sources")
 
 		if len(yamls) == 0 && len(envs) == 0 {
 			fmt.Fprintf(stderr, "  %s\n", cDim("(none - using defaults)"))
@@ -121,7 +120,7 @@ To create or edit configs:
 					tagStr = " " + cDim("("+d.tag+")")
 				}
 
-				entry := shortPath(dir) + "/" + files + tagStr
+				entry := prettyPath(dir) + files + tagStr
 
 				// Indent level: deepest = n-1, global = 0.
 				indent := n - 1 - i
@@ -136,42 +135,98 @@ To create or edit configs:
 			}
 		}
 
-		// --- context ---
-		section("context")
-		if ctx.IsGitDir {
-			label("repo", shortPath(ctx.Ceiling)+"  "+cDim("(git)"))
-		} else {
-			label("repo", cDim("none - walking up to ~/"))
-		}
-
-		// --- resolved ---
+		// --- resolved: the actual values that will be used ---
 		section("resolved")
 		label("server", serverStatusLine(addr))
-		if token != "" {
-			masked := token
-			if len(masked) > 8 {
-				masked = masked[:8] + "…"
+
+		// Token row. Tokens are explicit-only: if the matched profile
+		// names an env var via `token:`, show it + its set/unset state;
+		// otherwise show none.
+		profile := ""
+		if cfg.Servers != nil {
+			for name, srv := range cfg.Servers {
+				if srv.URL == addr {
+					profile = name
+					break
+				}
 			}
-			label("token", masked)
-		} else {
+		}
+		tokenVar := cfg.TokenVarFor(profile)
+		switch {
+		case tokenVar == "":
 			label("token", cDim("none"))
+		case token != "":
+			label("token", fmt.Sprintf("%s  %s", cAqua(tokenVar), cGreen("set")))
+		default:
+			label("token", fmt.Sprintf("%s  %s", cAqua(tokenVar), cDim("unset")))
 		}
-		if cfg.Name != "" {
-			label("name", cfg.Name)
+
+		if cfg.Job != "" {
+			label("job", cfg.Job)
 		}
-		if len(cfg.Runs) > 0 {
-			label("runs", fmt.Sprintf("%d sub-runs", len(cfg.Runs)))
-			for _, r := range cfg.Runs {
-				fmt.Fprintf(stderr, "            [%s] %s\n", r.Label, cDim(r.Command))
+		if cfg.RunName != "" {
+			label("run_name", cfg.RunName)
+		}
+		if cfg.Storage != "" {
+			label("storage", cAqua(shortPath(cfg.Storage)))
+		}
+		if cfg.History != nil {
+			label("history", fmt.Sprintf("%t", *cfg.History))
+		}
+		if cfg.Watch != nil {
+			rules := 0
+			if cfg.Watch.Rules != nil {
+				rules = len(cfg.Watch.Rules)
+			}
+			state := cDim("off")
+			if cfg.Watch.Enabled {
+				state = cGreen("on")
+			}
+			label("watch", fmt.Sprintf("%s  %d rule(s)", state, rules))
+		}
+
+		// --- streams: one section with column-aligned labels ---
+		if len(cfg.Streams) > 0 {
+			section(fmt.Sprintf("streams  %s", cDim(fmt.Sprintf("(%d)", len(cfg.Streams)))))
+			maxLabel := 0
+			for _, s := range cfg.Streams {
+				if n := len(s.Label); n > maxLabel {
+					maxLabel = n
+				}
+			}
+			for _, s := range cfg.Streams {
+				pad := strings.Repeat(" ", maxLabel-len(s.Label))
+				fmt.Fprintf(stderr, "  %s%s  %s\n", cBold("["+s.Label+"]"), pad, cDim(s.Command))
 			}
 		}
 
+		// --- profiles: name, url, token var (if any) ---
 		if len(cfg.Servers) > 0 {
-			section("profiles")
+			section(fmt.Sprintf("profiles  %s", cDim(fmt.Sprintf("(%d)", len(cfg.Servers)))))
+			maxName := 0
+			for name := range cfg.Servers {
+				if n := len(name); n > maxName {
+					maxName = n
+				}
+			}
 			for name, srv := range cfg.Servers {
-				label(name, srv.URL)
+				pad := strings.Repeat(" ", maxName-len(name))
+				line := cAqua(srv.URL)
+				if srv.Token != "" {
+					line += "  " + cDim("→ "+srv.Token)
+				}
+				fmt.Fprintf(stderr, "  %s%s  %s\n", cBold(name), pad, line)
 			}
 		}
+
+		// --- validation errors, only if any ---
+		if err := cfg.Validate(); err != nil {
+			section("invalid")
+			fmt.Fprintf(stderr, "  %s %s\n", cRed("✗"), cRed(err.Error()))
+		}
+
+		// ctx reference kept for future use (git root hint, etc.)
+		_ = ctx
 
 		fmt.Fprintf(stderr, "\n")
 		return nil
@@ -188,15 +243,15 @@ func serverStatusLine(addr string) string {
 	ok, reachable, authRequired, code := probeSpout(addr)
 	switch {
 	case !reachable:
-		return fmt.Sprintf("%s - %s", addr, cRed("unreachable"))
+		return fmt.Sprintf("%s  %s", addr, cRed("unreachable"))
 	case authRequired:
-		return fmt.Sprintf("%s - %s", addr, cYellow("auth required"))
+		return fmt.Sprintf("%s  %s", addr, cYellow("auth required"))
 	case ok:
-		return fmt.Sprintf("%s - %s", addr, cGreen("spout-compatible"))
+		return fmt.Sprintf("%s  %s", addr, cGreen("compatible"))
 	case code == 200:
-		return fmt.Sprintf("%s - %s", addr, cRed("not spout-compatible"))
+		return fmt.Sprintf("%s  %s", addr, cRed("not compatible"))
 	default:
-		return fmt.Sprintf("%s - %s %d", addr, cYellow("status"), code)
+		return fmt.Sprintf("%s  %s %d", addr, cYellow("status"), code)
 	}
 }
 
@@ -213,6 +268,46 @@ func shortPath(p string) string {
 		return "~"
 	}
 	return "~" + p[len(home):]
+}
+
+// prettyPath renders an absolute path for human display AND terminal paste.
+// It prefers a relative path (./, ../, ../../, ./sub/) when the target is
+// on cwd's direct ancestor-or-descendant chain; otherwise falls back to
+// shortPath ("~/..." or absolute). The return value always has a trailing
+// slash when it represents a directory, so callers can append a filename.
+//
+// Examples (cwd = /home/alice/spout):
+//   /home/alice/spout              -> ./
+//   /home/alice/spout/test         -> ./test/
+//   /home/alice                    -> ../
+//   /                              -> ~/ or absolute (sibling path)
+//   /home/alice/.config/spout      -> ~/.config/spout/  (sibling of cwd)
+func prettyPath(p string) string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return shortPath(p) + "/"
+	}
+	sep := string(filepath.Separator)
+
+	if p == cwd {
+		return "./"
+	}
+	// Target is inside cwd.
+	if strings.HasPrefix(p, cwd+sep) {
+		rel, err := filepath.Rel(cwd, p)
+		if err == nil {
+			return "./" + rel + "/"
+		}
+	}
+	// cwd is inside target (target is an ancestor).
+	if strings.HasPrefix(cwd, p+sep) {
+		rel, err := filepath.Rel(cwd, p)
+		if err == nil {
+			return rel + "/"
+		}
+	}
+	// Sibling or unrelated - prefer ~/ form.
+	return shortPath(p) + "/"
 }
 
 func init() {

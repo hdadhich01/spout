@@ -1,14 +1,17 @@
-# spout.yaml - project config (playground template)
+# spout.yaml - project config (the execution blueprint)
 #
 # Discovered automatically by walking up from cwd to the git root.
-# Overrides ~/.config/spout/spout.yaml on conflicts.
-# See docs/config.md for the authoritative field reference.
-# Safe to commit - tokens go in .env, not here.
+# Overrides ~/.config/spout/spout.yaml on conflicts (scalars override,
+# lists replace, maps merge). Safe to commit - tokens go in .env.
+# See docs/config.md for the authoritative schema.
 
-# Server to use for runs from this project.
+# Server to use for this project. Either:
+#   - a key from the `servers:` map (global or project)
+#   - a raw host:port
 server: localhost:3000
 
-# The overarching name for this cluster of runs (groups them on the dashboard).
+# Dashboard grouping label. Every run launched from this directory carries
+# this tag so the dashboard can group them.
 job: ml-training
 
 # Template for sequential run names. Defaults to word-xxxx when omitted.
@@ -21,51 +24,49 @@ job: ml-training
 #   {ts}         Unix timestamp
 #   {t:FORMAT}   custom datetime, e.g. {t:YYYY-MM-DD}, {t:dd/MM HH:mm}
 #                Tokens: YYYY YY MM DD dd HH hh mm ss (Moment/Java style)
+#
+# Examples:
+#   run_name: "exp-{n}"                # exp-1, exp-2, exp-3
+#   run_name: "{t:YYYY-MM-DD}-{n}"     # 2026-04-16-1
+#   run_name: "{input}-{n}"            # prompts for a label, e.g. lr-sweep-1
 run_name: "exp-{n}"
 
 # ──────────────────────────────────────────────────────────────
-# WATCHDOG / NOTIFICATIONS (opt-in, parsed but not yet executed)
-# Requires you to bring your own model or CLI tool.
-# Works with Tier 2 (spout.sh + E2E) and Tier 3 (local server).
+# WATCHDOG (opt-in LLM monitoring, parsed but not yet executed)
+# Brings your own model or CLI tool.
 # ──────────────────────────────────────────────────────────────
 
 watch:
-    enabled: true
-    default_interval: 2m # Fallback if a rule doesn't specify one
+    enabled: false
+    default_interval: 2m # fallback when a rule doesn't set its own
 
     # The model/CLI the watchdog should use.
-    # Options: local (Ollama/LM Studio), api (Gemini/OpenAI), or cli.
+    # type: local (Ollama/LM Studio), api (Gemini/OpenAI), or cli.
     model:
         type: local
-        endpoint: http://localhost:11434 # Ollama default. Change if using LM Studio, vLLM, etc.
+        endpoint: http://localhost:11434 # ollama default
 
-    # Rules define what to watch for. Each rule gets its own monitoring loop.
-    # Every `sources` entry must match a stream `label` defined below
-    # (the parser enforces this).
+    # Each rule gets its own polling loop. `sources` must match stream
+    # labels defined below - the parser enforces this as a foreign key.
     rules:
         - name: high-memory
-          prompt: "Alert immediately if memory usage > 80%, swap is being used, or there are signs of OOM risk. Also watch GPU memory."
+          prompt: "Alert if memory > 80%, swap active, or signs of OOM."
           interval: 60s
           sources: [system-monitor, gpu]
 
         - name: training-stuck
-          prompt: "Alert if training appears stuck: loss has not meaningfully decreased for 3+ epochs, GPU utilization is below 30% for more than 2 minutes, or learning rate has collapsed."
+          prompt: "Alert if loss hasn't decreased for 3+ epochs."
           interval: 3m
           sources: [training, gpu]
 
-        - name: nan-or-divergence
-          prompt: "Alert aggressively on NaN values, exploding loss, or any sign the training run is diverging."
-          interval: 30s
-          sources: [training]
-
 # ──────────────────────────────────────────────────────────────
 # STREAMS
-# The absolute source of truth for what gets executed.
-# Bare `spout` spins these up into discrete tmux panes.
-# Each stream's `dir:` is resolved relative to this yaml file.
+# Bare `spout` spins these up into discrete tmux panes under one
+# tmux session. Each `dir:` is resolved relative to this yaml file.
+# Stream-level `env:` overrides anything from walked-up .env files.
 # ──────────────────────────────────────────────────────────────
+
 streams:
-    # Primary ML training process.
     - label: training
       command: python train.py --epochs 200 --lr 0.001
       dir: ./src/models
@@ -73,15 +74,12 @@ streams:
           CUDA_VISIBLE_DEVICES: "0"
           BATCH_SIZE: "64"
 
-    # Companion: GPU monitoring (referenced by high-memory and training-stuck).
     - label: gpu
       command: watch -n 2 nvidia-smi
 
-    # Companion: System monitoring (referenced by high-memory).
     - label: system-monitor
       command: htop -d 5
 
-    # Companion: UI/Dashboard (not monitored by watchdog).
     - label: ui
       command: tensorboard --logdir ./logs
       dir: ./src/models

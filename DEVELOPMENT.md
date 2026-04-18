@@ -77,7 +77,7 @@ For architecture, tiers, config, and product design, see ARCHITECTURE.md.
 | Notifications (ntfy/Slack/Discord) | Medium | Alerts |
 | Server-side naming (spout.sh assigns names) | Small | Hosted |
 | Local run storage (CLI saves .raw locally) | Small | All tiers |
-| `storage_dir` config option | Small | All |
+| `storage` config option (local archive path) | Small | All |
 | Session TTL with 2w default on hosted | Small | Hosted |
 | `spout ls --history` (browse local run history) | Small | All tiers |
 | Self-hosted merged view (server + local history) | Medium | Tier 3 |

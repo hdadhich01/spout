@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -44,7 +43,7 @@ var serverCmd = &cobra.Command{
 			}
 		}
 
-		dir := filepath.Join(configDir(), "sessions")
+		dir := config.DefaultStorageDir()
 		st, err := store.New(dir)
 		if err != nil {
 			return fmt.Errorf("opening session store: %w", err)
@@ -71,14 +70,6 @@ func init() {
 	serverCmd.Flags().StringVarP(&serverPort, "port", "p", config.DefaultLocalPort, "port to listen on")
 	serverCmd.GroupID = groupServer
 	rootCmd.AddCommand(serverCmd)
-}
-
-func configDir() string {
-	if d, err := os.UserConfigDir(); err == nil {
-		return filepath.Join(d, "spout")
-	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "spout")
 }
 
 func checkPort(port string) error {

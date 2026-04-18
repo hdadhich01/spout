@@ -14,7 +14,7 @@ import (
 	"github.com/hdadhich01/spout/internal/names"
 )
 
-// probeSpout hits /api/health and returns the server's "spout-compatible" state.
+// probeSpout hits /api/health and returns the server's compatibility state.
 // - ok: reachable and returned {"spout": true}
 // - reachable: got any HTTP response (even non-spout)
 // - authRequired: 401/403
@@ -66,7 +66,7 @@ func checkServer(addr string) error {
 			cBold(addr), cAqua("SPOUT_TOKEN=... spout"), cAqua("spout login"))
 	}
 	if !ok {
-		return fmt.Errorf("server at %s is not spout-compatible\n\n  Start a local server:  %s\n  Or login to a server:  %s",
+		return fmt.Errorf("server at %s is not compatible\n\n  Start a local server:  %s\n  Or login to a server:  %s",
 			cBold(addr), cAqua("spout server"), cAqua("spout login <name>"))
 	}
 	return nil

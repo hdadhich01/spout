@@ -20,8 +20,12 @@ var runCmd = &cobra.Command{
 	Long: `Run a command in a detached tmux session and stream to the dashboard.
 Your shell returns immediately. Reattach with 'spout attach <name>'.
 
+With no command, opens an interactive shell session that streams to the
+dashboard. You're attached immediately; detach with Ctrl+b d.
+
 Spout flags must come BEFORE the command:
 
+  spout run                            # interactive shell
   spout run ping google.com
   spout run -n training python train.py
   spout -l run python train.py --epochs 100
@@ -31,7 +35,7 @@ If you need to pass flags that look like spout flags to your command,
 use '--' to separate them:
 
   spout run -- mycommand -n -l --foo`,
-	Args:               cobra.MinimumNArgs(1),
+	Args:               cobra.MinimumNArgs(0),
 	RunE:               runCommand,
 	DisableFlagParsing: false,
 }
@@ -49,10 +53,14 @@ func runCommand(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("tmux is required for 'spout run' but not found\n\n  Install: sudo apt install tmux  (Debian/Ubuntu)\n           brew install tmux     (macOS)")
 	}
 
-	// Preflight: verify the binary exists on PATH so obvious typos fail
-	// before we spin up a tmux session and server record.
-	if _, err := exec.LookPath(args[0]); err != nil {
-		return fmt.Errorf("command not found: %s", cBold(args[0]))
+	interactive := len(args) == 0
+
+	if !interactive {
+		// Preflight: verify the binary exists on PATH so obvious typos fail
+		// before we spin up a tmux session and server record.
+		if _, err := exec.LookPath(args[0]); err != nil {
+			return fmt.Errorf("command not found: %s", cBold(args[0]))
+		}
 	}
 
 	userChoseName := sessionName != ""
@@ -60,11 +68,12 @@ func runCommand(cmd *cobra.Command, args []string) error {
 		sessionName = names.Generate()
 	}
 
-	// Properly shell-quote each arg so embedded spaces/quotes survive `sh -c`.
-	userCmd := shellQuote(args)
-
-	if err := validateCommand(userCmd); err != nil {
-		return err
+	var userCmd string
+	if !interactive {
+		userCmd = shellQuote(args)
+		if err := validateCommand(userCmd); err != nil {
+			return err
+		}
 	}
 
 	spoutBin, err := os.Executable()
@@ -80,21 +89,64 @@ func runCommand(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Pre-create the session on the server with full metadata.
 	preCreate(addr, sessionName, userCmd)
 
-	// IMPORTANT: create the tmux session with a holding shell FIRST, then wire
-	// up pipe-pane, and only then send the user's command via send-keys. If
-	// we started the command as part of new-session, fast-failing commands
-	// (missing script, crash on startup) finish before pipe-pane attaches,
-	// so the exit marker is lost and the run looks like `ended` instead of
-	// `error`. By the time send-keys fires, the pipe is already listening.
+	word := names.Prefix(sessionName)
+	runURL := "http://" + addr + "/r/" + sessionName
+
+	if interactive {
+		// For an interactive shell we wrap the pane's first process in a
+		// tiny inline script: print a colored banner, then `exec $SHELL`
+		// so the user drops into a normal login-ish shell. Using a wrapper
+		// (rather than `send-keys printf`) avoids the shell echoing the
+		// `printf '...'` line itself when it ran, which looked messy and
+		// rendered without ANSI because the echoed text is literal.
+		//
+		// ANSI truecolor codes here MUST match color.go:
+		//   aqua  = \033[38;2;90;200;226m
+		//   green = \033[38;2;34;197;94m
+		//   dim   = \033[2m
+		banner := fmt.Sprintf(
+			`printf '\n  \033[38;2;90;200;226mspout: \033[0msession \033[1m%s\033[0m \033[38;2;34;197;94mstarted\033[0m\n  \033[38;2;90;200;226mspout: \033[0mdashboard at \033[38;2;90;200;226m%s\033[0m\n\n  \033[2mdetach:\033[0m Ctrl+b d\n\n'; exec $SHELL`,
+			word, runURL)
+		tmuxNew := exec.Command("tmux", "new-session", "-d", "-s", sessionName, "-x", "200", "-y", "50", "sh", "-c", banner)
+		if err := tmuxNew.Run(); err != nil {
+			return fmt.Errorf("creating tmux session: %w", err)
+		}
+
+		pipePaneCmd := fmt.Sprintf("%s _stream --server %s --session %s", spoutBin, addr, sessionName)
+		exec.Command("tmux", "pipe-pane", "-t", sessionName, pipePaneCmd).Run()
+
+		copyToClipboard(runURL)
+
+		// Attach (blocks until detach or session exit).
+		attach := exec.Command("tmux", "attach-session", "-t", sessionName)
+		attach.Stdin = os.Stdin
+		attach.Stdout = os.Stdout
+		attach.Stderr = os.Stderr
+		attach.Run()
+
+		// After detach/exit, show info on the original terminal.
+		fmt.Fprintln(os.Stderr)
+		ok("session %s %s", cBold(word), cGreen("detached"))
+		info("dashboard at %s", cAqua(runURL))
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintf(os.Stderr, "  %s  spout attach %s\n", cDim("attach:"), word)
+		fmt.Fprintf(os.Stderr, "  %s    spout ls\n", cDim("list:"))
+		fmt.Fprintf(os.Stderr, "  %s    spout kill %s\n", cDim("kill:"), word)
+		fmt.Fprintln(os.Stderr)
+
+		return nil
+	}
+
+	// Non-interactive: holding shell first, then pipe-pane, then send-keys.
+	// Order matters - pipe-pane must be wired before the user's command
+	// runs so fast-failing commands don't lose their exit marker.
 	tmuxNew := exec.Command("tmux", "new-session", "-d", "-s", sessionName, "-x", "200", "-y", "50")
 	if err := tmuxNew.Run(); err != nil {
 		return fmt.Errorf("creating tmux session: %w", err)
 	}
 
-	// Attach pipe-pane to stream all pane output to the server.
 	pipePaneCmd := fmt.Sprintf("%s _stream --server %s --session %s", spoutBin, addr, sessionName)
 	tmuxPipe := exec.Command("tmux", "pipe-pane", "-t", sessionName, pipePaneCmd)
 	if err := tmuxPipe.Run(); err != nil {
@@ -102,10 +154,7 @@ func runCommand(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("attaching pipe-pane: %w", err)
 	}
 
-	// Now inject the actual command. The OSC sequence \x1b]9999;<code>\x07
-	// is invisible to xterm.js but the spout server scans for it to record
-	// the exit code. `exec $SHELL` keeps the pane alive after the command
-	// finishes so the user can inspect output or run more commands.
+	// Non-interactive: inject the command, wait briefly for fast-fail, print info.
 	shellCmd := fmt.Sprintf("%s; printf '\\033]9999;%%d\\007' $?; exec $SHELL", userCmd)
 	tmuxSend := exec.Command("tmux", "send-keys", "-t", sessionName, shellCmd, "Enter")
 	if err := tmuxSend.Run(); err != nil {
@@ -113,10 +162,6 @@ func runCommand(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("sending command: %w", err)
 	}
 
-	// Short fast-fail window: poll the server to see if the command errored
-	// before we even printed "session started". If it did, tear down the
-	// session and surface the error to the user - there's no point leaving
-	// a dead session around for a command that never got off the ground.
 	if failed, exitCode := waitForFastFail(addr, sessionName, 1500*time.Millisecond); failed {
 		exec.Command("tmux", "kill-session", "-t", sessionName).Run()
 		deleteRun(addr, sessionName)
@@ -125,8 +170,6 @@ func runCommand(cmd *cobra.Command, args []string) error {
 		return ErrAlreadyReported
 	}
 
-	word := names.Prefix(sessionName)
-	runURL := "http://" + addr + "/r/" + sessionName
 	ok("session %s %s", cBold(word), cGreen("started"))
 	info("dashboard at %s", cAqua(runURL))
 	copyToClipboard(runURL)
@@ -138,6 +181,7 @@ func runCommand(cmd *cobra.Command, args []string) error {
 
 	return nil
 }
+
 
 // waitForFastFail polls the server to detect commands that error out
 // immediately (missing script, crash on startup, bad flags). Returns

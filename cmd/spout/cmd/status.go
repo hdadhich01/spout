@@ -62,7 +62,7 @@ func fetchRuns(addr string) ([]runEntry, error) {
 		return nil, fmt.Errorf("auth required")
 	}
 	if !ok {
-		return nil, fmt.Errorf("not spout-compatible")
+		return nil, fmt.Errorf("not compatible")
 	}
 
 	client := http.Client{Timeout: 3e9}

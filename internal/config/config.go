@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,31 +10,85 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config is the merged result of system + project config.
+// Config is the merged result of every spout.yaml found during walk-up.
+// One schema - global and project files map to the same struct.
+// See docs/config.md for the authoritative field reference.
 type Config struct {
-	// System-level (from ~/.config/spout/config.yaml)
-	DefaultServer string            `yaml:"default_server,omitempty"`
-	Servers       map[string]Server `yaml:"servers,omitempty"`
+	// Routing (scalar, override).
+	DefaultServer string `yaml:"default_server,omitempty"`
+	ServerRef     string `yaml:"server,omitempty"` // profile name or host:port
+	Job           string `yaml:"job,omitempty"`    // dashboard grouping label
+	RunName       string `yaml:"run_name,omitempty"`
 
-	// Can be set at system or project level. Project overrides system.
-	ServerRef string `yaml:"server,omitempty"` // profile name or host:port
-	Name      string `yaml:"name,omitempty"`   // session name
-	Runs      []Run  `yaml:"runs,omitempty"`   // sub-runs for bare `spout`
+	// Storage (scalar, override; typically global-only).
+	Storage string `yaml:"storage,omitempty"`
+	History *bool  `yaml:"history,omitempty"` // pointer so "unset" != "false"
+
+	// Address book (map, merge).
+	Servers map[string]Server `yaml:"servers,omitempty"`
+
+	// Execution blueprint (list, replace).
+	Streams []Stream `yaml:"streams,omitempty"`
+
+	// Watchdog (object, merged field-by-field; Rules list replaces).
+	Watch *Watch `yaml:"watch,omitempty"`
+
+	// sourceFile tracks which yaml file this Config was parsed from, so
+	// stream-relative `dir:` values can later be resolved to absolute paths.
+	// Not serialized.
+	sourceFile string `yaml:"-"`
 }
 
-// Server is a named server profile (system config only, URLs only - tokens in .env).
+// Server is a named server profile. `URL` is the address; `Token` names the
+// env var that holds the auth token for this server (the value itself lives
+// in .env so it never gets committed alongside the yaml).
+//
+// Tokens are explicit-only: if a profile does NOT declare `token:`, no
+// token is sent for that server. There is no implicit fallback to
+// SPOUT_TOKEN_<PROFILE> or SPOUT_TOKEN - you opt in by naming the var.
 type Server struct {
-	URL string `yaml:"url"`
+	URL   string `yaml:"url"`
+	Token string `yaml:"token,omitempty"` // name of the env var, not the value
 }
 
-// Run is a sub-run definition in project config.
-type Run struct {
-	Label   string `yaml:"label"`
-	Command string `yaml:"command"`
+// Stream is one tmux pane in a bare-`spout` launch.
+type Stream struct {
+	Label   string            `yaml:"label"`
+	Command string            `yaml:"command"`
+	Dir     string            `yaml:"dir,omitempty"` // relative to owning yaml file
+	Env     map[string]string `yaml:"env,omitempty"`
+
+	// SourceFile records the yaml file this stream was defined in, so the
+	// CLI can resolve `Dir` relative to the correct directory. Not serialized.
+	SourceFile string `yaml:"-"`
 }
 
-// Load reads system config, system .env, then walks up from cwd for project config.
-// Merges all layers with project overriding system.
+// Watch is the LLM-powered monitoring subsystem. Currently parsed + validated
+// but not executed (see docs/roadmap.md).
+type Watch struct {
+	Enabled         bool        `yaml:"enabled,omitempty"`
+	DefaultInterval string      `yaml:"default_interval,omitempty"`
+	Model           *WatchModel `yaml:"model,omitempty"`
+	Rules           []WatchRule `yaml:"rules,omitempty"`
+}
+
+// WatchModel identifies the backing LLM for the watchdog.
+type WatchModel struct {
+	Type     string `yaml:"type,omitempty"`     // "local" | "api" | "cli"
+	Endpoint string `yaml:"endpoint,omitempty"` // required when type=local
+}
+
+// WatchRule is one monitoring loop.
+type WatchRule struct {
+	Name     string   `yaml:"name"`
+	Prompt   string   `yaml:"prompt"`
+	Interval string   `yaml:"interval,omitempty"`
+	Sources  []string `yaml:"sources"` // must match Stream labels
+}
+
+// Load reads every spout.yaml on the walk-up path plus the global file, then
+// merges them (deepest wins) and loads .env files. Does not validate; call
+// Validate() to check foreign-key constraints.
 func Load() Config {
 	migrateLegacy()
 	sys := loadFile(SystemPath())
@@ -43,12 +98,32 @@ func Load() Config {
 	return cfg
 }
 
-// LoadedFiles returns the absolute paths of all spout.yaml and .env files
-// that get merged for the current cwd. Returned in order of precedence:
-// highest (deepest project) first, lowest (system) last.
-//
-// Used by `spout config` to show what's actually being loaded and in what
-// order.
+// Validate checks invariants that can't be expressed in the struct alone.
+// Currently enforces foreign-key integrity between watch.rules and streams.
+// Returns nil if the config is valid or if there's nothing to validate.
+func (c Config) Validate() error {
+	if c.Watch == nil || len(c.Watch.Rules) == 0 {
+		return nil
+	}
+	labels := make(map[string]struct{}, len(c.Streams))
+	for _, s := range c.Streams {
+		labels[s.Label] = struct{}{}
+	}
+	for _, r := range c.Watch.Rules {
+		for _, src := range r.Sources {
+			if _, ok := labels[src]; !ok {
+				return fmt.Errorf("watch rule %q references unknown stream %q (define it under streams:)", r.Name, src)
+			}
+		}
+	}
+	if c.Watch.Model != nil && c.Watch.Model.Type == "local" && c.Watch.Model.Endpoint == "" {
+		return fmt.Errorf("watch.model.type=local requires watch.model.endpoint")
+	}
+	return nil
+}
+
+// LoadedFiles returns absolute paths of every spout.yaml and .env that get
+// merged for the current cwd. Deepest-first order. Used by `spout config`.
 func LoadedFiles() (configs []string, envs []string) {
 	migrateLegacy()
 
@@ -56,7 +131,6 @@ func LoadedFiles() (configs []string, envs []string) {
 	if err == nil {
 		ceiling := findCeiling(cwd)
 
-		// Walk up from cwd to ceiling collecting yaml + env files (deepest first).
 		dir := cwd
 		for {
 			for _, name := range []string{"spout.yaml", ".spout.yaml"} {
@@ -81,7 +155,6 @@ func LoadedFiles() (configs []string, envs []string) {
 		}
 	}
 
-	// System config is the lowest priority - append last.
 	if _, err := os.Stat(SystemPath()); err == nil {
 		configs = append(configs, SystemPath())
 	}
@@ -92,8 +165,8 @@ func LoadedFiles() (configs []string, envs []string) {
 	return
 }
 
-// Resolve returns the server URL and token for a given CLI input.
-// Priority: CLI flag > project config > system config > default (spout.sh)
+// Resolve returns the server URL and token for a given CLI flag input.
+// Priority: CLI flag > merged server ref > merged default_server > remote default.
 func (c Config) Resolve(cliFlag string) (url, token string) {
 	input := cliFlag
 	if input == "" {
@@ -106,37 +179,45 @@ func (c Config) Resolve(cliFlag string) (url, token string) {
 		return DefaultRemoteHost, ""
 	}
 
-	// Check if it's a profile name.
 	if c.Servers != nil {
 		if srv, ok := c.Servers[input]; ok {
-			token = resolveToken(input)
-			return srv.URL, token
+			return srv.URL, resolveTokenForServer(srv)
 		}
 	}
-
-	// Use as-is (raw host:port).
-	return input, resolveToken("")
+	// Raw host:port - no profile, no token. Use -s to select a profile if
+	// you need auth.
+	return input, ""
 }
 
-// resolveToken gets a token for a profile from env vars.
-// Checks SPOUT_TOKEN_<PROFILE> first, falls back to SPOUT_TOKEN.
-func resolveToken(profile string) string {
-	if profile != "" {
-		key := "SPOUT_TOKEN_" + strings.ToUpper(profile)
-		if v := os.Getenv(key); v != "" {
-			return v
-		}
+// resolveTokenForServer returns the auth token for a server profile.
+// Explicit-only: if the profile doesn't name an env var via `token:`,
+// there is no token.
+func resolveTokenForServer(srv Server) string {
+	if srv.Token == "" {
+		return ""
 	}
-	return os.Getenv("SPOUT_TOKEN")
+	return os.Getenv(srv.Token)
 }
 
-// loadEnvTokens loads .env files from system dir then walks up from cwd.
-// System .env has lowest priority, deepest folder .env has highest.
+// TokenVarFor returns the env-var name a profile reads its token from,
+// or empty if the profile doesn't declare one. Used by `spout config`
+// to render the token row honestly instead of guessing at conventions.
+func (c Config) TokenVarFor(profile string) string {
+	if profile == "" || c.Servers == nil {
+		return ""
+	}
+	srv, ok := c.Servers[profile]
+	if !ok {
+		return ""
+	}
+	return srv.Token
+}
+
+// loadEnvTokens loads system .env, then walks up from cwd loading each .env
+// (outermost first, so the deepest file wins per variable).
 func loadEnvTokens(cfg *Config) {
-	// System .env (lowest priority - loaded first, won't override later ones)
 	loadDotenv(filepath.Join(filepath.Dir(SystemPath()), ".env"))
 
-	// Walk up from cwd to project root, collect .env paths
 	dir, err := os.Getwd()
 	if err != nil {
 		return
@@ -157,27 +238,24 @@ func loadEnvTokens(cfg *Config) {
 		}
 		dir = parent
 	}
-	// Load from outermost to innermost (so innermost wins)
 	for i := len(envPaths) - 1; i >= 0; i-- {
 		loadDotenv(envPaths[i])
 	}
 }
 
-// Exists returns true if a system config file exists on disk.
+// Exists returns true if the system spout.yaml exists on disk.
 func Exists() bool {
 	_, err := os.Stat(SystemPath())
 	return err == nil
 }
 
-// Context returns discovery context for the current cwd - useful for
-// displaying where the CLI is looking and what kind of project it found.
+// Context is the discovery context for the current cwd.
 type Context struct {
 	Cwd      string
 	Ceiling  string // git root or home dir
 	IsGitDir bool
 }
 
-// DiscoverContext returns the discovery context for the current cwd.
 func DiscoverContext() Context {
 	cwd, _ := os.Getwd()
 	ceiling := findCeiling(cwd)
@@ -190,8 +268,6 @@ func DiscoverContext() Context {
 }
 
 // SystemPath returns ~/.config/spout/spout.yaml.
-// All config files (system and project) use the same name and schema.
-// If a legacy config.yaml exists at this location, migrate it on read.
 func SystemPath() string {
 	if d, err := os.UserConfigDir(); err == nil {
 		return filepath.Join(d, "spout", "spout.yaml")
@@ -200,7 +276,6 @@ func SystemPath() string {
 	return filepath.Join(home, ".config", "spout", "spout.yaml")
 }
 
-// legacySystemPath is the old config.yaml location, migrated automatically.
 func legacySystemPath() string {
 	if d, err := os.UserConfigDir(); err == nil {
 		return filepath.Join(d, "spout", "config.yaml")
@@ -209,7 +284,7 @@ func legacySystemPath() string {
 	return filepath.Join(home, ".config", "spout", "config.yaml")
 }
 
-// migrateLegacy renames the old config.yaml to spout.yaml if needed.
+// migrateLegacy renames a leftover ~/.config/spout/config.yaml → spout.yaml.
 func migrateLegacy() {
 	old := legacySystemPath()
 	new := SystemPath()
@@ -217,26 +292,45 @@ func migrateLegacy() {
 		return
 	}
 	if _, err := os.Stat(new); err == nil {
-		return // new path already exists, nothing to migrate
+		return
 	}
 	if _, err := os.Stat(old); err == nil {
 		os.Rename(old, new)
 	}
 }
 
-// merge combines system and project configs. Project wins on conflicts.
+// merge folds a project config onto a system/base config.
+// Merge semantics per docs/config.md:
+//
+//	Map     -> MERGE, deepest per key      (servers, watch sub-scalars)
+//	List    -> REPLACE, deepest wins       (streams, watch.rules)
+//	Scalar  -> OVERRIDE, deepest wins      (server, job, run_name, ...)
+//
+// `proj` is closer to cwd than `sys`, so proj wins.
 func merge(sys, proj Config) Config {
 	out := sys
+
+	// Scalars - override if proj set them.
+	if proj.DefaultServer != "" {
+		out.DefaultServer = proj.DefaultServer
+	}
 	if proj.ServerRef != "" {
 		out.ServerRef = proj.ServerRef
 	}
-	if proj.Name != "" {
-		out.Name = proj.Name
+	if proj.Job != "" {
+		out.Job = proj.Job
 	}
-	if len(proj.Runs) > 0 {
-		out.Runs = proj.Runs // replaces, no merge
+	if proj.RunName != "" {
+		out.RunName = proj.RunName
 	}
-	// Merge servers: project profiles override system profiles on name conflicts.
+	if proj.Storage != "" {
+		out.Storage = proj.Storage
+	}
+	if proj.History != nil {
+		out.History = proj.History
+	}
+
+	// Maps - merge, proj wins per key.
 	if len(proj.Servers) > 0 {
 		if out.Servers == nil {
 			out.Servers = make(map[string]Server)
@@ -245,16 +339,44 @@ func merge(sys, proj Config) Config {
 			out.Servers[k] = v
 		}
 	}
+
+	// Lists - proj replaces entirely when set.
+	if len(proj.Streams) > 0 {
+		out.Streams = proj.Streams
+	}
+
+	// Watch - object merge. Sub-scalars override; Rules list replaces.
+	if proj.Watch != nil {
+		if out.Watch == nil {
+			out.Watch = &Watch{}
+		}
+		if proj.Watch.Enabled {
+			out.Watch.Enabled = true
+		}
+		if proj.Watch.DefaultInterval != "" {
+			out.Watch.DefaultInterval = proj.Watch.DefaultInterval
+		}
+		if proj.Watch.Model != nil {
+			if out.Watch.Model == nil {
+				out.Watch.Model = &WatchModel{}
+			}
+			if proj.Watch.Model.Type != "" {
+				out.Watch.Model.Type = proj.Watch.Model.Type
+			}
+			if proj.Watch.Model.Endpoint != "" {
+				out.Watch.Model.Endpoint = proj.Watch.Model.Endpoint
+			}
+		}
+		if len(proj.Watch.Rules) > 0 {
+			out.Watch.Rules = proj.Watch.Rules
+		}
+	}
+
 	return out
 }
 
-// loadProjectConfigs walks up from cwd to the project root, collects all
-// spout.yaml files, then merges them (deepest wins on conflicts).
-//
-// Project root is determined by:
-// 1. Git root (`git rev-parse --show-toplevel`) if in a git repo
-// 2. Home directory if not in a git repo
-// 3. Filesystem root as absolute fallback
+// loadProjectConfigs walks up cwd → ceiling collecting spout.yaml files,
+// merges from outermost to innermost so the deepest wins.
 func loadProjectConfigs() Config {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -273,7 +395,6 @@ func loadProjectConfigs() Config {
 				break
 			}
 		}
-		// Stop at ceiling (git root, home, or filesystem root).
 		if dir == ceiling {
 			break
 		}
@@ -284,7 +405,6 @@ func loadProjectConfigs() Config {
 		dir = parent
 	}
 
-	// Merge from outermost (parent) to innermost (deepest).
 	var result Config
 	for i := len(configs) - 1; i >= 0; i-- {
 		result = merge(result, configs[i])
@@ -292,23 +412,33 @@ func loadProjectConfigs() Config {
 	return result
 }
 
-// findCeiling returns the directory to stop walking up at.
 func findCeiling(cwd string) string {
-	// Try git root first.
 	if out, err := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel").Output(); err == nil {
 		return strings.TrimSpace(string(out))
 	}
-	// Fall back to home directory.
 	if home, err := os.UserHomeDir(); err == nil {
 		return home
 	}
 	return "/"
 }
 
+// isEmpty returns true if a parsed Config carries no interesting fields.
+// Used to skip empty/missing files during walk-up without polluting the
+// merge pipeline.
 func isEmpty(c Config) bool {
-	return c.Name == "" && c.ServerRef == "" && len(c.Runs) == 0
+	return c.DefaultServer == "" &&
+		c.ServerRef == "" &&
+		c.Job == "" &&
+		c.RunName == "" &&
+		c.Storage == "" &&
+		c.History == nil &&
+		len(c.Servers) == 0 &&
+		len(c.Streams) == 0 &&
+		c.Watch == nil
 }
 
+// loadFile parses a single yaml file. Records the sourceFile on the struct
+// plus on every stream so relative paths can be resolved later.
 func loadFile(path string) Config {
 	var cfg Config
 	data, err := os.ReadFile(path)
@@ -316,11 +446,15 @@ func loadFile(path string) Config {
 		return cfg
 	}
 	yaml.Unmarshal(data, &cfg)
+	cfg.sourceFile = path
+	for i := range cfg.Streams {
+		cfg.Streams[i].SourceFile = path
+	}
 	return cfg
 }
 
-// loadDotenv reads a .env file and sets any unset env vars.
-// Does NOT override existing env vars.
+// loadDotenv reads a .env file and sets any currently-unset env vars.
+// Does NOT override vars already present in the process environment.
 func loadDotenv(path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -338,7 +472,6 @@ func loadDotenv(path string) {
 		k = strings.TrimSpace(k)
 		v = strings.TrimSpace(v)
 		v = strings.Trim(v, `"'`)
-		// Don't override env vars that are already set (even if empty).
 		if _, exists := os.LookupEnv(k); !exists {
 			os.Setenv(k, v)
 		}
@@ -358,19 +491,18 @@ func WriteSystem(c Config) error {
 	return os.WriteFile(SystemPath(), data, 0644)
 }
 
-const DefaultSystemConfig = `# spout.yaml - system config (lowest priority, applies everywhere)
-# Location: ~/.config/spout/spout.yaml
-#
-# Same schema as a project spout.yaml. Project files override this.
-
-# Default server when no -s flag is given and no project spout.yaml sets one.
-default_server: spout.sh
-
-# Named server profiles. Use with: spout -s <name>
-# Tokens go in ~/.config/spout/.env (SPOUT_TOKEN_<PROFILE>=...), not here.
-# servers:
-#   work:
-#     url: spout.company.internal:3000
-#   home:
-#     url: myserver.com:3000
-`
+// EnsureSystemConfig writes the global template to ~/.config/spout/spout.yaml
+// if that file is missing or empty. Returns true if a write happened.
+// Called on CLI startup so fresh installs get an annotated starter file
+// without requiring `spout login`.
+func EnsureSystemConfig() (wrote bool, err error) {
+	p := SystemPath()
+	if st, err := os.Stat(p); err == nil && st.Size() > 0 {
+		return false, nil
+	}
+	dir := filepath.Dir(p)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return false, err
+	}
+	return true, os.WriteFile(p, []byte(GlobalTemplate), 0644)
+}

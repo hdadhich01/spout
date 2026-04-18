@@ -1,7 +1,13 @@
 # CLAUDE.md - Spout
 
-AI agent reference. For product/architecture details, see ARCHITECTURE.md.
-For current state and dev log, see DEVELOPMENT.md.
+AI agent quick-ref. The old monolithic ARCHITECTURE.md has been split into
+focused files under [`docs/`](docs/) - start at
+[docs/README.md](docs/README.md). For the running dev log (what shipped
+when), see [DEVELOPMENT.md](DEVELOPMENT.md).
+
+When a question is about config fields / merge semantics, the authoritative
+source is [docs/config.md](docs/config.md) - defer to it over anything you
+see in code if the two disagree.
 
 ## Build / Test
 

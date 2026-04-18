@@ -1,0 +1,32 @@
+# spout.yaml - global config
+# Location: ~/.config/spout/spout.yaml
+#
+# Applies everywhere; project spout.yaml files walk up from cwd and
+# override per-field. See docs/config.md for the authoritative schema.
+
+# Fallback server when no project config specifies one.
+default_server: spout.sh
+
+# Where the CLI locally archives .raw stream files (all tiers).
+# storage: ~/.config/spout/storage
+
+# Persist .raw files locally? Set false for CI/CD.
+# history: true
+
+# Address book of known spout servers. Use with: spout -s <name>
+#
+# Auth is explicit-only. If a profile needs a token, set `token:` to the
+# NAME of the env var that holds the value. The value itself lives in
+# ~/.config/spout/.env so it never gets committed to git. Profiles without
+# `token:` are no-auth - spout sends nothing in the Authorization header.
+#
+#   servers:
+#     work:
+#       url: spout.company.internal:3000
+#       token: SPOUT_TOKEN_WORK
+#     home:
+#       url: home.lan:3000
+#
+# And in ~/.config/spout/.env:
+#   SPOUT_TOKEN_WORK=alice-secret-token
+# servers:

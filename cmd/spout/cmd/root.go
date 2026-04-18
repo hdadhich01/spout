@@ -40,6 +40,11 @@ const (
 )
 
 func Execute() error {
+	// Best-effort: populate the global config with the annotated template
+	// if it's missing or empty. No-op on existing files so we never clobber
+	// user edits. Failures are silent (permission issues etc.) - every
+	// callsite that actually needs config handles the absent case.
+	config.EnsureSystemConfig()
 	return rootCmd.Execute()
 }
 
@@ -71,6 +76,13 @@ func resolveServer() (addr, token string) {
 func runPipe(cmd *cobra.Command, args []string) error {
 	stat, _ := os.Stdin.Stat()
 	if (stat.Mode() & os.ModeCharDevice) != 0 {
+		// TTY stdin - no pipe. If the merged config defines `streams:`,
+		// bare `spout` is the blueprint launcher; otherwise fall through
+		// to the status display.
+		cfg := config.Load()
+		if len(cfg.Streams) > 0 {
+			return runStreams(cfg)
+		}
 		return showStatus(cmd)
 	}
 
@@ -252,11 +264,21 @@ func streamToSession(ctx context.Context, r io.Reader, addr, session, mode, comm
 }
 
 func humanBytes(b int64) string {
+	const (
+		kb = 1024
+		mb = 1024 * kb
+		gb = 1024 * mb
+		tb = 1024 * gb
+	)
 	switch {
-	case b >= 1024*1024:
-		return fmt.Sprintf("%.1f MB", float64(b)/(1024*1024))
-	case b >= 1024:
-		return fmt.Sprintf("%.1f KB", float64(b)/1024)
+	case b >= tb:
+		return fmt.Sprintf("%.1f TB", float64(b)/float64(tb))
+	case b >= gb:
+		return fmt.Sprintf("%.1f GB", float64(b)/float64(gb))
+	case b >= mb:
+		return fmt.Sprintf("%.1f MB", float64(b)/float64(mb))
+	case b >= kb:
+		return fmt.Sprintf("%.1f KB", float64(b)/float64(kb))
 	default:
 		return fmt.Sprintf("%d B", b)
 	}

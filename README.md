@@ -1,159 +1,262 @@
 # Spout
 
-Pipe any terminal command into a live, mobile-friendly web dashboard with smart
-parsing, metrics, and notifications.
+Pipe any terminal command into a live web dashboard, or launch a whole
+blueprint of commands in a single tmux session and watch them all at
+once. Works locally (Tier 3), over a hosted SaaS (Tier 2, planned), or
+via plain `nc` (Tier 1, planned).
 
 ```bash
-python train.py | spout
+python train.py | spout                  # pipe mode
+spout run python train.py --epochs 100   # detached tmux run
+spout run                                # interactive tmux shell
+spout                                    # bare: launch streams: blueprint
 ```
 
-Scan the QR code. Watch progress, metrics, and logs update in real time on your
-phone. Get push notifications when it finishes or something goes wrong.
+The dashboard is embedded in the binary. Run `spout server` and open
+`localhost:3000`.
 
-## What It Does
+## Status
 
-Spout reads stdout from any long-running command, cleans up messy output
-(tqdm progress bars, `\r` spam, ANSI escape sequences), extracts metrics
-(loss, accuracy, epoch, ETA, and generic `key=value` pairs), and streams
-everything to a beautiful dashboard with:
+Tier 3 (local / self-hosted) is feature-complete for single-user use.
+Tier 2 (hosted SaaS with E2E encryption) and Tier 1 (`nc`) are the
+next major phases. See [DEVELOPMENT.md](DEVELOPMENT.md) for what's
+shipped vs. pending and [docs/roadmap.md](docs/roadmap.md) for the
+build order.
 
-- Large live progress bar
-- Sparkline charts for tracked metrics
-- Cleaned log view with search/filter
-- Optional raw terminal view (xterm.js)
-- NLP-powered watch rules ("notify me when loss drops below 0.15")
-- PWA installable on your phone with push notifications
-- QR code for instant mobile access
-
-Works with ML training, builds, data pipelines, encoding, tests, AI agent
-sessions, and any other long-running CLI process.
-
-## Usage
-
-### Pipe Mode - watch while it runs
+## Install
 
 ```bash
-python train.py | spout
+go install github.com/hdadhich01/spout/cmd/spout@latest
 ```
 
-```
-Spout • resnet-cifar-run-74
-Progress:  62% • Epoch 31/50 • Loss: 0.192 • Acc: 93.4%
+Requires Go 1.22+ and `tmux` for `spout run`. `xclip` / `pbcopy` / `wl-copy`
+enables auto-clipboard.
 
-Encrypted session created
-https://spout.sh/v/silent-rain-837#key=9vK7mPq2xL...
+On first invocation the CLI writes an annotated
+`~/.config/spout/spout.yaml` starter into place (nothing is overwritten
+if it already has content).
 
-Scan this QR code with your phone:
-    [ QR CODE ]
-
-Privacy: End-to-end encrypted. Only you can read this.
-```
-
-Your output is encrypted locally before it leaves your machine. The server only
-sees ciphertext. The decryption key lives in the URL fragment and never touches
-the server.
-
-### Run Mode - fire and forget
+## Quickstart
 
 ```bash
-spout run --name "llama-finetune" "python train.py --epochs 100"
+spout server                    # start local dashboard on :3000
+python train.py | spout -l      # stream a command, -l = localhost
+open http://localhost:3000      # live output, xterm.js, status dots
 ```
 
-Creates a detached tmux session. Your terminal returns immediately. Check back
-anytime:
+## Modes
+
+### Pipe mode — foreground, streams stdin
 
 ```bash
-spout ls                    # list managed sessions
-spout attach llama-finetune # re-attach to the tmux session
+command | spout
 ```
 
-Works great with AI coding agents too:
+Reads stdin, sends to the server, pipes through to your stdout.
+Aborts cleanly (no ghost server session) if the upstream command dies
+before producing output.
+
+### Run mode — detached tmux
 
 ```bash
-spout run --agent claude "claude code --task 'refactor auth module'"
+spout run python train.py --epochs 100
+spout run -n training -- mycommand -n -l --foo   # -- escapes spout flags
 ```
 
-### Zero-Install (Tier 1, unencrypted)
-
-No binary needed. Works with `nc`:
+Creates a detached tmux session. Your shell returns immediately.
+Reattach any time:
 
 ```bash
-python train.py | nc spout.sh 1337
+spout ls                        # list all runs
+spout attach training           # reattach to the tmux pane
+spout kill training             # stop it (with confirmation)
+spout logs training             # replay output to stdout
 ```
 
-Fast and frictionless, but unencrypted - the server can see your output.
-
-### Fully Local (Tier 3)
-
-Run everything on your own machine:
+### Interactive shell mode — `spout run` with no args
 
 ```bash
-spout server
+spout run
 ```
 
-No data leaves your machine. Optional tunnel via localhost.run for remote access.
+Opens a live tmux shell, streamed to the dashboard. Ctrl+b d to detach.
+Everything you type flows through to the web viewer.
 
-## Three Tiers
+### Streams blueprint — bare `spout` with `streams:` config
 
-| Tier | How | Privacy | Requires CLI |
-|------|-----|---------|--------------|
-| 1 - Zero-Install | `nc spout.sh 1337` | None (server sees plaintext) | No |
-| 2 - Encrypted Hosted | `command \| spout` | E2E encrypted (AES-GCM, key in URL fragment) | Yes |
-| 3 - Self-Hosted | `spout server` | Full (everything local) | Yes |
+Drop a `spout.yaml` in a project directory:
 
-Tier 2 is the recommended default. Tier 1 exists for zero-friction onboarding.
-Tier 3 is for users who want full control.
+```yaml
+server: localhost:3000
+job: ml-training
+run_name: "exp-{n}"
 
-## Smart Features
+streams:
+  - label: training
+    command: python train.py --epochs 200
+    dir: ./src/models
+    env:
+      CUDA_VISIBLE_DEVICES: "0"
 
-**Parser presets** - Built-in rules for tqdm, cargo, ffmpeg, pytest, Claude Code,
-and Aider output. Extracts progress, metrics, and status automatically.
+  - label: gpu
+    command: watch -n 2 nvidia-smi
 
-**Watchdog** - Fast regex layer for real-time metric tracking. Optional LLM layer
-(Haiku, GPT-4o-mini, Ollama) analyzes recent chunks with a rolling summary for
-intelligent alerts ("training stalled", "needs human input", "loss plateaued").
+  - label: logs
+    command: tail -f output.log
+```
 
-**Notifications** - ntfy, Slack, Discord, webhooks. PWA push to your phone. cmux
-socket forwarding when running inside cmux.
+Then:
 
-**cmux compatible** - Parses OSC 777/99 sequences. `spout notify` mirrors the
-`cmux notify` CLI. Existing cmux hooks and Claude Code scripts work without
-modification. Spout is a remote companion to cmux, not a replacement.
+```bash
+spout                           # launches all three as tmux panes,
+                                # each streamed to the dashboard as a
+                                # separate run (exp-1-training, etc.)
+```
+
+Every dashboard run carries the `job:` tag so groupings are possible
+(server-side grouping coming in the next phase).
+
+## Command reference
+
+| Group | Command | What |
+|---|---|---|
+| streaming | `spout run [cmd...]` | Detached tmux; no args → interactive shell |
+| streaming | `command \| spout` | Pipe stdin to server |
+| streaming | `spout` | If `streams:` defined, launch the blueprint; otherwise show status |
+| sessions | `spout ls` | All runs (active + ended), paged |
+| sessions | `spout stats` | Aggregate metrics |
+| sessions | `spout attach NAME` | Reattach to tmux |
+| sessions | `spout kill NAME` | Kill a tmux session |
+| sessions | `spout open NAME` | Open the dashboard URL in a browser |
+| sessions | `spout share NAME` | Print + copy run URL |
+| sessions | `spout logs NAME` | Replay recorded output |
+| sessions | `spout rename OLD NEW` | |
+| sessions | `spout delete NAME...` / `rm` | |
+| sessions | `spout clean` | Interactive bulk cleanup |
+| server | `spout server` | Start the local server |
+| setup | `spout init` | Write project `spout.yaml` from template |
+| setup | `spout login [profile]` | Add / edit a server profile |
+| setup | `spout config` | Show loaded files + resolved values |
+| setup | `spout doctor` | 11 environment / config checks |
+
+## Config
+
+One schema across global (`~/.config/spout/spout.yaml`) and project
+(`<repo>/spout.yaml`) files. CLI walks up from cwd collecting
+`spout.yaml` and `.env` files, merges deepest-wins.
+
+Key fields:
+
+| Field | Type | Purpose |
+|---|---|---|
+| `default_server` | scalar | Fallback server if no project config sets one |
+| `server` | scalar | This project's server — profile name or `host:port` |
+| `servers` | map | Address book of named profiles (with optional `token: ENV_VAR`) |
+| `job` | scalar | Dashboard grouping label |
+| `run_name` | scalar | Template for sequential run names |
+| `storage` | scalar | Local archive path (default `~/.config/spout/storage`) |
+| `history` | bool | Persist `.raw` locally |
+| `streams` | list | Tmux panes for bare `spout` |
+| `watch` | object | LLM watchdog (parsed + validated, execution planned) |
+
+Full spec: [docs/config.md](docs/config.md).
+
+### `run_name` templates
+
+```yaml
+run_name: "exp-{n}"                 # exp-1, exp-2, ...
+run_name: "{t:YYYY-MM-DD}-{n}"      # 2026-04-16-1
+run_name: "{input}-{n}"             # prompts for a label at launch
+```
+
+Variables: `{n}`, `{input}`, `{date}`, `{time}`, `{ts}`, `{t:FORMAT}`.
+Custom datetime tokens (Moment/Java-style): `YYYY YY MM DD dd HH hh mm ss`.
+
+### Auth
+
+Explicit-only. A profile uses a token iff it declares `token:`, and the
+value is the **name** of the env var that holds the actual token:
+
+```yaml
+# ~/.config/spout/spout.yaml
+servers:
+  work:
+    url: spout.company.internal:3000
+    token: SPOUT_TOKEN_WORK
+```
+
+```ini
+# ~/.config/spout/.env
+SPOUT_TOKEN_WORK=alice-secret-token
+```
+
+Profiles without `token:` are no-auth. See [docs/auth.md](docs/auth.md).
+
+## Status taxonomy
+
+| State | Color | Meaning |
+|---|---|---|
+| streaming | green `#22c55e` | Receiving data right now |
+| awaiting | yellow `#eab308` | Run-mode shell idle at a prompt |
+| success | dark green `#166534` | Run-mode command exited 0 |
+| error | red `#b91c1c` | Run-mode command exited non-zero |
+| killed | gray `#555` | Ended before any exit marker (user kill / close terminal) |
+
+Colors are 24-bit truecolor on the CLI and the exact same hex on the web
+dashboard — changing one edits both.
 
 ## Architecture
 
+Go monorepo, two binaries, shared internal packages:
+
 ```
-command | spout CLI ---[AES-GCM ciphertext]--> spout.sh ---[SSE]--> Browser
-                                                                     |
-                                                            WebCrypto decrypts
-                                                            with #key fragment
+cmd/spout/      CLI
+cmd/server/     Standalone server entry point
+internal/
+  server/       Fiber HTTP + WS + embedded dashboard
+  store/        Folder-per-session file persistence
+  config/       Schema, walk-up merge, templates
+  names/        Word-xxxx generator
+  parser/       ANSI cleanup
+  types/        Shared types
+web/static/     Dashboard source (embedded into server binary)
+docs/           Architecture + spec (start at docs/README.md)
 ```
 
-Go monorepo with two binaries sharing internal packages:
+Two WebSocket libraries (one per HTTP stack) because Fiber and
+`net/http` don't share one. See [CLAUDE.md](CLAUDE.md) for the full
+key-patterns list.
 
-- `cmd/cli/` - the `spout` binary (pipe mode, run mode, notify, ls, attach)
-- `cmd/server/` - the spout.sh hosted backend
-- `internal/` - shared parser, types, state, crypto, watchdog, notifier
-- `web/static/` - HTMX + Tailwind + Chart.js dashboard with PWA support (embedded via `go:embed`)
+## Tiers
 
-For Tier 3, the CLI embeds and runs the same server locally.
+| Tier | How | Privacy | CLI required? |
+|---|---|---|---|
+| 1 — `nc` (planned) | `command \| nc spout.sh 1337` | Plaintext | No |
+| 2 — Hosted E2E (planned) | `command \| spout` | AES-256-GCM, key in URL fragment | Yes |
+| 3 — Self-hosted (shipped) | `spout server` | Full local | Yes |
 
-## Tech Stack
-
-Go / Fiber / HTMX / Tailwind / Chart.js / xterm.js / AES-GCM / WebCrypto /
-SSE / PWA / SQLite / PostgreSQL
+Same binary everywhere. See [docs/tiers.md](docs/tiers.md).
 
 ## Development
 
 ```bash
-go build ./cmd/cli/
-go build ./cmd/server/
-
+go build ./...              # build both binaries
+go install ./cmd/spout/     # install CLI as `spout`
+go vet ./...
 go test ./...
 ```
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) for current status, architecture decisions,
-and development priorities.
+After editing `web/static/*.html` sync to the embed dir:
+
+```bash
+cp web/static/*.html internal/server/static/
+```
+
+Yaml templates (`internal/config/templates/*.yaml`) are embedded via
+`go:embed` — changes take effect on next build.
+
+For the current-state feature list and dev log see
+[DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## License
 

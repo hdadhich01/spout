@@ -15,6 +15,8 @@ It doesn't care what server it talks to.
 | `command \| spout` | Foreground. Reads stdin, sends to server, passes through to stdout. | Yes |
 | `spout run cmd` | Detached tmux session. Returns immediately. Streams via pipe-pane. | Yes |
 | `spout run` (no args) | Interactive tmux shell. Attaches immediately; detach with Ctrl+b d. | Yes |
+| `spout` (bare, with `streams:`) | Launches each stream in its own tmux pane under one session. | Yes |
+| `spout` (bare, no `streams:`) | Status display (banner, server, active / recent). | No (offline-ok) |
 | `spout server` | Starts the server locally. | - |
 | `spout attach/kill/ls/...` | Session management (tmux + server). | Varies |
 
@@ -74,5 +76,6 @@ Auto-generated names are `word-xxxx` (e.g., `wolf-a3f2`). The short form
 `word` is used in most output lines; the full form disambiguates on collision.
 
 `-n NAME` lets the user choose; if it collides, `spout` prompts to replace
-or rename. Configured runs `[planned]` can use a `run_name` template - see
-[config.md](config.md).
+or rename. `streams:` launches use a `run_name` template (supporting `{n}`,
+`{input}`, `{t:FORMAT}`, etc.) — see [config.md](config.md) for the token
+list.

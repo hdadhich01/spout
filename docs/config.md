@@ -22,17 +22,18 @@ only understand a subset today.
    | Kind | How they combine | Examples |
    |---|---|---|
    | **Map** | MERGE, deepest wins per key | `servers:`, `env:` |
-   | **List** | REPLACE, deepest wins entirely | `streams:`, `watch.rules:`, `runs:` |
+   | **List** | REPLACE, deepest wins entirely | `streams:`, `watch.rules:` |
    | **Scalar** | OVERRIDE, deepest wins | `job:`, `server:`, `default_server:` |
 
    A project that defines `streams:` completely overwrites any `streams:`
    from parents. A project that defines `servers:` adds to / overrides
    individual entries without dropping the global address book.
 
-4. **Foreign-key validation** `[planned]`. Before executing, the parser
-   validates that every string in `watch.rules[].sources` is the `label`
-   of a stream in the merged `streams:` list. Dangling references abort
-   with a readable error.
+4. **Foreign-key validation**. `cfg.Validate()` checks that every string
+   in `watch.rules[].sources` is the `label` of a stream in the merged
+   `streams:` list, and that `watch.model.type: local` declares an
+   `endpoint:`. `spout config`, `spout doctor`, and `runStreams()` all
+   call this before doing work.
 
 ## 2. Priority order
 
@@ -115,12 +116,13 @@ server: work-cluster
 # Dashboard grouping name for this directory.
 job: ml-pipeline
 
-# Template for sequential run names. Defaults to word-xxxx when omitted.   [planned]
-# Variables: {n}, {date}, {time}, {ts}, {word}
+# Template for sequential run names. Defaults to word-xxxx when omitted.
+# Variables: {n}, {input}, {date}, {time}, {ts}, {t:FORMAT}
 run_name: "exp-{n}"
 
 # ──────────────────────────────────────────────────────────────
-# WATCHDOG (opt-in LLM monitoring)                             [planned]
+# WATCHDOG (opt-in LLM monitoring; parsed + validated today,
+# polling loops not yet executed - see docs/roadmap.md)
 # ──────────────────────────────────────────────────────────────
 
 watch:
@@ -145,7 +147,7 @@ watch:
       sources: [training, gpu]
 
 # ──────────────────────────────────────────────────────────────
-# STREAMS (the tmux panes)                                     [planned]
+# STREAMS (the tmux panes spawned by bare `spout`)
 # ──────────────────────────────────────────────────────────────
 # Absolute source of truth for execution. LIST - a child file that
 # defines `streams:` completely replaces any parent `streams:`.

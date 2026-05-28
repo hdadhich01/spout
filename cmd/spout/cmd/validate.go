@@ -75,7 +75,9 @@ func checkServer(addr string) error {
 // resolveSessionName checks for name collisions with the server.
 // If the user chose a name and it exists, prompt to replace or rename.
 // If auto-generated, retry until a unique name is found.
-func resolveSessionName(addr string, name *string, userChose bool) error {
+// When `autoReplace` is true (-y), an existing user-chosen name is
+// replaced silently — same effect as picking [r] at the prompt.
+func resolveSessionName(addr string, name *string, userChose, autoReplace bool) error {
 	if !sessionExists(addr, *name) {
 		return nil
 	}
@@ -88,11 +90,18 @@ func resolveSessionName(addr string, name *string, userChose bool) error {
 				return nil
 			}
 		}
-		return fmt.Errorf("could not generate a unique session name after 10 attempts")
+		return fmt.Errorf("couldn't pick a unique run name after 10 tries")
 	}
 
-	// User chose the name and it exists - prompt.
-	warn("session %s %s", cBold(*name), cYellow("already exists"))
+	if autoReplace {
+		// -y: replace silently.
+		client := http.Client{Timeout: 5 * time.Second}
+		req, _ := http.NewRequest("DELETE", "http://"+addr+"/api/run/"+*name, nil)
+		client.Do(req)
+		return nil
+	}
+
+	warn("run %s %s", cBold(*name), cYellow("already exists"))
 	fmt.Fprintf(stderr, "  %s replace existing  %s rename\n", cAqua(cBold("[r]")), cAqua(cBold("[n]")))
 	fmt.Fprintf(stderr, "  > ")
 
@@ -102,7 +111,6 @@ func resolveSessionName(addr string, name *string, userChose bool) error {
 
 	switch input {
 	case "r", "replace", "":
-		// Delete the existing session and proceed with the same name.
 		client := http.Client{Timeout: 5 * time.Second}
 		req, _ := http.NewRequest("DELETE", "http://"+addr+"/api/run/"+*name, nil)
 		client.Do(req)
@@ -115,10 +123,39 @@ func resolveSessionName(addr string, name *string, userChose bool) error {
 			return fmt.Errorf("no name provided")
 		}
 		*name = newName
-		return resolveSessionName(addr, name, true) // re-check
+		return resolveSessionName(addr, name, true, autoReplace)
 	default:
 		return fmt.Errorf("cancelled")
 	}
+}
+
+// sessionStatus probes /api/run/<name> and returns (exists, active, reachable).
+// `reachable=false` means the server didn't respond at all — distinct from
+// "responded with 404", which is `exists=false, reachable=true`.
+func sessionStatus(addr, name string) (exists, active, reachable bool) {
+	client := http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://" + addr + "/api/run/" + name)
+	if err != nil {
+		return false, false, false
+	}
+	defer resp.Body.Close()
+	reachable = true
+	if resp.StatusCode != 200 {
+		return false, false, true
+	}
+	if !strings.Contains(resp.Header.Get("Content-Type"), "json") {
+		return false, false, true
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	var m map[string]any
+	if json.Unmarshal(body, &m) != nil {
+		return false, false, true
+	}
+	exists = true
+	if v, _ := m["active"].(bool); v {
+		active = true
+	}
+	return
 }
 
 func sessionExists(addr, name string) bool {

@@ -32,22 +32,40 @@ job: ml-training
 run_name: "exp-{n}"
 
 # ──────────────────────────────────────────────────────────────
-# WATCHDOG (opt-in LLM monitoring, parsed but not yet executed)
-# Brings your own model or CLI tool.
+# OBSERVE (opt-in LLM observability)
+# A CLI-side loop feeds recent output to a model and emits structured
+# events: live status, extracted metrics, an end-of-run synthesis, and
+# built-in agent-failure detectors. One engine — your custom rules ride
+# the same LLM call as the built-ins.
 # ──────────────────────────────────────────────────────────────
 
-watch:
+observe:
     enabled: false
-    default_interval: 2m # fallback when a rule doesn't set its own
+    default_interval: 60s # fallback poll cadence when a rule sets none
 
-    # The model/CLI the watchdog should use.
-    # type: local (Ollama/LM Studio), api (Gemini/OpenAI), or cli.
+    # The backing model. type: api (cloud, default), local (Ollama/LM
+    # Studio), or cli (shell out to an installed agent).
+    #   - api:   model: a model id; token: env-var NAME holding the key
+    #            (defaults to ANTHROPIC_API_KEY).
+    #   - local: endpoint: the OpenAI-compatible URL.
+    # NOTE: on E2E (Tier 2) runs an `api` model still SEES your output —
+    # use type: local or cli to keep everything on-box.
     model:
-        type: local
-        endpoint: http://localhost:11434 # ollama default
+        type: api
+        model: claude-haiku-4-5
+        # token: ANTHROPIC_API_KEY
+        # endpoint: http://localhost:11434  # when type: local
 
-    # Each rule gets its own polling loop. `sources` must match stream
-    # labels defined below - the parser enforces this as a foreign key.
+    # Built-in detectors run with zero config when observe is enabled.
+    # Uncomment to turn any off.
+    # detectors:
+    #     classify: true   # auto-detect run type
+    #     loop: true       # repeated identical failure/attempt
+    #     drift: true      # agent diverging from its stated goal
+    #     amnesia: true    # re-asking / re-doing / dropping constraints
+
+    # Custom prompts, folded into the same LLM call. `sources` (optional)
+    # must match stream labels below — the parser enforces it as a key.
     rules:
         - name: high-memory
           prompt: "Alert if memory > 80%, swap active, or signs of OOM."

@@ -4,278 +4,655 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>spout</title>
+  <link rel="icon" href="/static/favicon.svg">
   <style>
+    /* ─────────────────────────────────────────────────────────────────
+       spout — admin dashboard. TUI-panels aesthetic: monospace, thin
+       aqua-tinted borders, labels pulled onto the rule. Hover/press
+       polish is transform/opacity only; everything respects
+       prefers-reduced-motion.
+       ───────────────────────────────────────────────────────────────── */
+    :root {
+      --bg: #0a0a0a;
+      --panel: #0e0e0e;
+      --panel-2: #131313;       /* hover/row bg */
+      --border: #383838;        /* brighter — sections actually read as sections */
+      --border-hi: #4a4a4a;
+      --aqua: #5ac8e2;
+      --aqua-dim: #2d6573;
+      --text: #ededed;
+      --dim: #9a9a9a;
+      --dimmer: #6a6a6a;
+      /* Status palette — must match cmd/spout/cmd/color.go + session.html. */
+      --c-streaming: #22c55e;
+      --c-awaiting:  #eab308;
+      --c-success:   #166534;
+      --c-error:     #b91c1c;
+      --c-killed:    #6a6a6a;   /* brighter so ended runs are visible */
+
+      /* Custom easing per Emil's principles — built-ins are too weak. */
+      --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+    }
+
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      background: #0a0a0a;
-      color: #e0e0e0;
-      font-family: -apple-system, system-ui, 'Segoe UI', sans-serif;
-      padding: 24px;
-      max-width: 800px;
+    html, body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'SF Mono', 'JetBrains Mono', 'Cascadia Code', 'Menlo', monospace;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    body { padding: 22px 16px 32px; min-height: 100vh; }
+
+    .frame {
+      max-width: 960px;
       margin: 0 auto;
-    }
-    h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; color: #5ac8e2; }
-    .subtitle { color: #666; font-size: 13px; margin-bottom: 24px; }
-
-    .section-label {
-      font-size: 11px;
-      color: #5ac8e2;
-      font-family: 'SF Mono', monospace;
-      font-weight: 600;
-      letter-spacing: 0.5px;
-      text-transform: lowercase;
-      margin-top: 24px;
-      margin-bottom: 8px;
-      padding-left: 4px;
-    }
-    .section-label:first-of-type { margin-top: 0; }
-    .section-count {
-      color: #555;
-      font-weight: 400;
-      margin-left: 6px;
-    }
-
-    .runs { display: flex; flex-direction: column; gap: 8px; }
-
-    .run {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      padding: 12px 16px;
-      background: #141414;
-      border: 1px solid #222;
+      border: 1px solid var(--border);
       border-radius: 8px;
-      text-decoration: none;
-      color: inherit;
-      transition: border-color 0.15s;
-    }
-    .run:hover { border-color: #444; }
-
-    .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-    /* Status dot colors - must match CLI color.go statusText/statusDot. */
-    .dot-green     { background: #22c55e; box-shadow: 0 0 6px #22c55e88; } /* streaming */
-    .dot-yellow    { background: #eab308; box-shadow: 0 0 6px #eab30888; } /* awaiting  */
-    .dot-darkgreen { background: #166534; }                                /* success   */
-    .dot-red       { background: #b91c1c; }                                /* error     */
-    .dot-gray      { background: #555; }                                   /* killed    */
-
-    /* Hover popup for status dots. */
-    .dot-wrap {
+      background: var(--panel);
       position: relative;
-      display: inline-flex;
-      align-items: center;
+    }
+
+    /* Title strip: the "┌─ spout ─...── self-hosted ─┐" effect, done with
+       a flex row that overlaps the top border via a negative margin. */
+    .frame-head {
+      display: flex; align-items: center; gap: 12px;
+      margin: -10px 16px 0;
+      padding: 0;
+      font-size: 11px;
+      letter-spacing: 0.04em;
+    }
+    .frame-head .brand {
+      background: var(--panel);
+      padding: 0 8px;
+      color: var(--aqua);
+      font-weight: 600;
+      font-size: 13px;
+    }
+    .frame-head .rule { flex: 1; height: 1px; background: var(--border); }
+    .frame-head .tag {
+      background: var(--panel);
+      padding: 0 8px;
+      color: var(--dim);
+      text-transform: lowercase;
+    }
+    .frame-head .tag b { color: var(--aqua); font-weight: 500; }
+
+    .frame-body { padding: 18px 18px 12px; }
+
+    /* Section: an inner panel with its own label pulled onto its border. */
+    .section { border: 1px solid var(--border); border-radius: 6px; margin-bottom: 14px; }
+    .section-head {
+      display: flex; align-items: center; gap: 10px;
+      margin: -9px 12px 0;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .section-head .label { background: var(--panel); padding: 0 6px; color: var(--aqua); font-weight: 600; }
+    .section-head .rule { flex: 1; height: 1px; background: var(--border); }
+    .section-head .count {
+      background: var(--panel); padding: 0 6px;
+      color: var(--dim); font-weight: 400;
+    }
+    .section-body { padding: 10px 12px 12px; }
+
+    /* Run row — dot + name + tag tight-packed left; meta right-packed. */
+    .run {
+      display: flex; align-items: center; gap: 10px;
+      padding: 7px 10px;
+      border: 1px solid transparent;
+      border-radius: 4px;
+      color: inherit;
+      text-decoration: none;
+      transition: background-color 160ms var(--ease-out), border-color 160ms var(--ease-out);
+    }
+    .run + .run { margin-top: 1px; }
+    @media (hover: hover) and (pointer: fine) {
+      .run:hover { background: var(--panel-2); border-color: var(--border-hi); }
+    }
+    .run-name {
+      font-size: 13px; font-weight: 500;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      min-width: 0;
+    }
+    .run-name .suffix { color: var(--dimmer); font-weight: 400; }
+    .run-tag {
+      font-size: 10px;
+      color: var(--dim);
+      padding: 1px 6px;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      text-transform: lowercase;
       flex-shrink: 0;
     }
+    .run-meta {
+      margin-left: auto;
+      font-size: 11px;
+      color: var(--dim);
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .run-meta .sep { color: var(--dimmer); margin: 0 6px; }
+
+    /* Multi-stream run — group header + indented stream rows. The left tree-line
+       is aqua-dim so it reads as "branch", not a duplicate of the frame border. */
+    .run-group {
+      margin: 4px 0 6px;
+      border-left: 2px solid var(--aqua-dim);
+      border-radius: 0 4px 4px 0;
+      padding-left: 8px;
+    }
+    .group-head {
+      display: flex; align-items: center; gap: 10px;
+      padding: 7px 10px;
+      font-size: 13px;
+      color: var(--text);
+    }
+    .group-head .group-count { color: var(--dimmer); font-size: 11px; }
+    .group-head .run-meta { margin-left: auto; }
+    .run.stream { padding-left: 26px; }       /* indent streams under their run */
+    .run.stream .run-name { color: var(--text); }
+
+    /* job / run path — slash-separated, dim job + bright run. Same vocabulary
+       as the breadcrumb on the run page so the hierarchy reads consistently. */
+    .path { display: inline-flex; align-items: center; gap: 6px; }
+    .path-job { color: var(--dim); }
+    .path-sep { color: var(--dimmer); }
+    .path-run { color: var(--text); font-weight: 500; }
+    .path-suffix { color: var(--dimmer); font-weight: 400; }
+
+    /* Active / ended subhead — its own thin rule, more legible. */
+    .subhead {
+      display: flex; align-items: center; gap: 10px;
+      padding: 12px 6px 6px;
+      font-size: 10px;
+      color: var(--dim);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .subhead:first-child { padding-top: 4px; }
+    .subhead .rule { flex: 1; height: 1px; background: var(--border); }
+    .subhead .count { color: var(--dimmer); }
+
+    .dot { width: 8px; height: 8px; border-radius: 50%; }
+    .dot-wrap { position: relative; display: inline-flex; align-items: center; }
+    .dot-streaming { background: var(--c-streaming); box-shadow: 0 0 8px var(--c-streaming); }
+    .dot-awaiting  { background: var(--c-awaiting);  box-shadow: 0 0 8px var(--c-awaiting); }
+    .dot-success   { background: var(--c-success); }
+    .dot-error     { background: var(--c-error); }
+    .dot-killed    { background: var(--c-killed); }
+
+    /* Tooltip on the status dot — instant once one is open (Emil's rule). */
     .dot-tip {
       position: absolute;
-      bottom: calc(100% + 8px);
+      bottom: calc(100% + 6px);
       left: 50%;
-      transform: translateX(-50%);
-      background: #1a1a1a;
-      border: 1px solid #333;
-      color: #ddd;
-      font-family: -apple-system, system-ui, sans-serif;
-      font-size: 11px;
-      padding: 6px 10px;
-      border-radius: 6px;
+      transform: translateX(-50%) scale(0.97);
+      transform-origin: bottom center;
+      background: #161616;
+      border: 1px solid var(--border-hi);
+      color: var(--text);
+      font-size: 10px;
+      padding: 5px 8px;
+      border-radius: 5px;
       white-space: nowrap;
       pointer-events: none;
       opacity: 0;
-      transition: opacity 0.15s;
-      z-index: 10;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+      transition: opacity 125ms var(--ease-out), transform 125ms var(--ease-out);
+      z-index: 5;
     }
-    .dot-tip-label { font-weight: 600; }
-    .dot-tip-desc { color: #888; font-size: 10px; margin-top: 2px; }
-    .dot-tip::after {
-      content: '';
-      position: absolute;
-      top: 100%;
-      left: 50%;
-      transform: translateX(-50%);
-      border: 4px solid transparent;
-      border-top-color: #333;
-    }
-    .dot-wrap:hover .dot-tip { opacity: 1; }
-
-    .run-info { flex: 1; min-width: 0; }
-    .run-name {
-      font-family: 'SF Mono', 'Cascadia Code', monospace;
-      font-size: 14px;
-      font-weight: 500;
-    }
-    .run-meta {
-      font-size: 12px;
-      color: #666;
-      margin-top: 2px;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .run-mode {
-      font-family: 'SF Mono', 'Cascadia Code', monospace;
-      font-size: 10px;
-      background: #1a1a1a;
-      padding: 1px 5px;
-      border-radius: 3px;
-      color: #666;
-    }
-    .run-time {
-      color: #555;
-      font-size: 11px;
-      cursor: default;
-    }
-    .run-bytes {
-      font-family: 'SF Mono', monospace;
-      font-size: 12px;
-      color: #555;
-      flex-shrink: 0;
+    .dot-tip .desc { color: var(--dim); font-size: 10px; margin-top: 1px; }
+    @media (hover: hover) and (pointer: fine) {
+      .dot-wrap:hover .dot-tip { opacity: 1; transform: translateX(-50%) scale(1); }
     }
 
-    .group-label {
-      font-size: 11px;
-      color: #444;
-      font-family: 'SF Mono', monospace;
-      margin-top: 20px;
-      margin-bottom: 6px;
-      padding-left: 4px;
-    }
-    .group-label:first-child { margin-top: 0; }
-
+    /* Empty state — beginner-friendly: a copy-paste command box. */
     .empty {
-      text-align: center;
-      color: #555;
-      padding: 48px 0;
-      font-size: 14px;
+      padding: 28px 12px; text-align: center; color: var(--dim);
     }
     .empty code {
-      background: #1a1a1a;
-      padding: 2px 6px;
+      display: inline-block; margin-top: 10px;
+      background: #131313; border: 1px solid var(--border);
+      padding: 6px 10px; border-radius: 4px; color: var(--text); font-size: 12px;
+    }
+
+    /* Token rows + create form. */
+    .token-row {
+      display: grid;
+      grid-template-columns: minmax(120px, 1fr) minmax(160px, 2fr) auto auto;
+      gap: 12px;
+      align-items: center;
+      padding: 6px 10px;
+      border: 1px solid transparent;
       border-radius: 4px;
-      font-size: 13px;
+      transition: border-color 160ms var(--ease-out), background-color 160ms var(--ease-out);
+    }
+    .token-row + .token-row { margin-top: 2px; }
+    @media (hover: hover) and (pointer: fine) {
+      .token-row:hover { background: #131313; border-color: var(--border); }
+    }
+    .token-label { font-size: 12px; color: var(--text); }
+    .token-val { font-size: 11px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; }
+    .token-date { font-size: 10px; color: var(--dimmer); }
+
+    .token-create { display: flex; gap: 8px; margin-top: 10px; }
+    .token-create input {
+      flex: 1;
+      background: #0a0a0a;
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 7px 10px;
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: 12px;
+      transition: border-color 160ms var(--ease-out);
+    }
+    .token-create input:focus { outline: none; border-color: var(--aqua); }
+
+    .btn {
+      background: #141414;
+      border: 1px solid var(--border-hi);
+      color: var(--dim);
+      font-family: inherit;
+      font-size: 11px;
+      padding: 6px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: transform 100ms var(--ease-out),
+                  background-color 160ms var(--ease-out),
+                  border-color 160ms var(--ease-out),
+                  color 160ms var(--ease-out);
+    }
+    .btn:active { transform: scale(0.97); }
+    @media (hover: hover) and (pointer: fine) {
+      .btn:hover { color: var(--text); border-color: #444; }
+    }
+    .btn-primary { color: var(--aqua); border-color: var(--aqua-dim); }
+    @media (hover: hover) and (pointer: fine) {
+      .btn-primary:hover { background: #0e2b33; border-color: var(--aqua); color: var(--aqua); }
+    }
+    .btn-danger { }
+    @media (hover: hover) and (pointer: fine) {
+      .btn-danger:hover { color: #f87171; border-color: #5a2424; background: #1a0e0e; }
+    }
+
+    /* The "you just created a token, copy it now" reveal box. */
+    .token-new {
+      background: #0e2b33;
+      border: 1px solid var(--aqua-dim);
+      border-radius: 6px;
+      padding: 12px 14px;
+      margin-bottom: 12px;
+      font-size: 12px;
+      color: #bfe9f5;
+      transition: opacity 200ms var(--ease-out);
+    }
+    .token-new b { color: var(--aqua); }
+    .token-new .tok {
+      display: block; margin-top: 6px; padding: 6px 8px;
+      background: #07171b; border: 1px solid var(--aqua-dim); border-radius: 4px;
+      color: var(--text); font-size: 12px; word-break: break-all;
+    }
+    .token-new .copy-row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+    .token-new .ok { color: #22c55e; font-size: 11px; }
+
+    /* Bottom legend — single centered chip overlaid on the frame's bottom
+       border (the "pulled label" pattern, mirroring the title strip). */
+    .frame-foot {
+      display: flex; justify-content: center;
+      margin: 0 16px -10px;
+      padding-top: 14px;
+      font-size: 10px;
+      letter-spacing: 0.04em;
+    }
+    .legend {
+      background: var(--panel); padding: 0 12px;
+      display: flex; gap: 12px; align-items: center;
+    }
+    .legend .item { display: inline-flex; align-items: center; gap: 5px; color: var(--dim); text-transform: lowercase; }
+    .legend .item .dot { width: 6px; height: 6px; box-shadow: none; }
+
+    a { color: var(--aqua); }
+    .logout { color: var(--dim); text-decoration: none; }
+    .logout:hover { color: var(--aqua); }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        transition: none !important;
+        animation: none !important;
+      }
+      .btn:active { transform: none; }
     }
   </style>
 </head>
 <body>
-  <h1>spout</h1>
-  <p class="subtitle">runs</p>
-  <div class="runs" id="runs"></div>
+  <main class="frame">
+    <header class="frame-head">
+      <span class="brand">▍ spout</span>
+      <span class="rule"></span>
+      <span class="tag"><b>self-hosted</b> · <a class="logout" href="/admin/logout">log out</a></span>
+    </header>
+
+    <div class="frame-body">
+
+      <section class="section">
+        <div class="section-head">
+          <span class="label">runs</span>
+          <span class="rule"></span>
+          <span class="count" id="runs-count">0</span>
+        </div>
+        <div class="section-body" id="runs">
+          <div class="empty">loading runs…</div>
+        </div>
+      </section>
+
+      <section class="section" id="tokens-section" style="display:none">
+        <div class="section-head">
+          <span class="label">ingest tokens</span>
+          <span class="rule"></span>
+          <span class="count" id="tokens-count">0</span>
+        </div>
+        <div class="section-body">
+          <div class="token-new" id="token-new" style="display:none"></div>
+          <div id="tokens"></div>
+          <div class="token-create">
+            <input id="token-label" placeholder="new token label (e.g. alice)" autocomplete="off" />
+            <button class="btn btn-primary" id="token-add">create token</button>
+          </div>
+        </div>
+      </section>
+
+    </div>
+
+    <footer class="frame-foot">
+      <span class="legend">
+        <span class="item"><span class="dot dot-streaming"></span>live</span>
+        <span class="item"><span class="dot dot-awaiting"></span>idle</span>
+        <span class="item"><span class="dot dot-success"></span>done</span>
+        <span class="item"><span class="dot dot-error"></span>error</span>
+        <span class="item"><span class="dot dot-killed"></span>stopped</span>
+      </span>
+    </footer>
+  </main>
 
   <script>
+    // ───────── shared formatters ─────────
+    function humanBytes(b) {
+      if (b >= 1024 * 1024) return (b / (1024 * 1024)).toFixed(1) + ' MB';
+      if (b >= 1024) return (b / 1024).toFixed(1) + ' KB';
+      return (b || 0) + ' B';
+    }
     function humanDuration(ms) {
       const m = Math.floor(ms / 60000);
       if (m < 1) return '<1m';
       if (m < 60) return m + 'm';
       if (m < 24 * 60) {
-        const h = Math.floor(m / 60);
-        const mins = m % 60;
-        return mins === 0 ? h + 'h' : h + 'h' + mins + 'm';
+        const h = Math.floor(m / 60), mm = m % 60;
+        return mm === 0 ? h + 'h' : h + 'h' + mm + 'm';
       }
-      const d = Math.floor(m / (24 * 60));
-      const h = Math.floor((m % (24 * 60)) / 60);
-      return h === 0 ? d + 'd' : d + 'd' + h + 'h';
+      const d = Math.floor(m / 1440);
+      return d + 'd';
+    }
+    // Relative time, monospace-friendly. "just now" / "12s ago" / "3m ago" /
+    // "2h ago" / "5d ago" / older: "may 17". Auto-updates every poll cycle.
+    function humanTime(ms) {
+      const diff = Date.now() - ms;
+      if (diff < 5000) return 'just now';
+      const s = Math.floor(diff / 1000);
+      if (s < 60) return s + 's ago';
+      const m = Math.floor(s / 60);
+      if (m < 60) return m + 'm ago';
+      const h = Math.floor(m / 60);
+      if (h < 24) return h + 'h ago';
+      const d = Math.floor(h / 24);
+      if (d < 30) return d + 'd ago';
+      return new Date(ms).toLocaleDateString([], { month: 'short', day: 'numeric' }).toLowerCase();
+    }
+    function esc(s) {
+      return String(s).replace(/[&<>"]/g, c =>
+        ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
     }
 
-    function humanTimestamp(ms) {
-      const d = new Date(ms);
-      const now = new Date();
-      const sameDay = d.toDateString() === now.toDateString();
-      const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
-      const isYesterday = d.toDateString() === yesterday.toDateString();
-      // "2:03pm" with no space before am/pm
-      const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-        .toLowerCase().replace(/\s+/g, '');
-      if (sameDay) return 'Today @ ' + time;
-      if (isYesterday) return 'Yesterday @ ' + time;
-      const daysAgo = Math.floor((now - d) / (1000 * 60 * 60 * 24));
-      if (daysAgo < 7) {
-        const day = d.toLocaleDateString([], { weekday: 'short' });
-        return day + ' @ ' + time;
-      }
-      return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' @ ' + time;
-    }
-
-    function displayName(name) {
-      const i = name.lastIndexOf('-');
-      if (i > 0) return name.substring(0, i);
-      return name;
-    }
-
-    // Single source of truth for status label + color + tooltip.
-    // Must match cmd/spout/cmd/color.go statusText() and session.html.
-    function statusInfo(status) {
-      switch (status) {
-        case 'streaming': return { label: 'streaming',         color: 'green',     desc: 'receiving data right now' };
-        case 'awaiting':  return { label: 'awaiting input',    color: 'yellow',    desc: 'shell is idle at a prompt' };
-        case 'success':   return { label: 'completed',         color: 'darkgreen', desc: 'command exited cleanly (0)' };
-        case 'error':     return { label: 'exited with error', color: 'red',       desc: 'command exited non-zero' };
-        case 'killed':    return { label: 'stopped by you',    color: 'gray',      desc: 'session ended before the command finished (kill / close terminal)' };
-        default:          return { label: status || 'unknown', color: 'gray',      desc: '' };
+    // Status taxonomy — matches cmd/spout/cmd/color.go + session.html.
+    function statusInfo(s) {
+      switch (s) {
+        case 'streaming': return { color: 'streaming', label: 'live',     desc: 'receiving data right now' };
+        case 'awaiting':  return { color: 'awaiting',  label: 'idle',     desc: 'shell is idle at a prompt' };
+        case 'success':   return { color: 'success',   label: 'done',     desc: 'exited cleanly (0)' };
+        case 'error':     return { color: 'error',     label: 'error',    desc: 'exited non-zero' };
+        case 'killed':    return { color: 'killed',    label: 'stopped',  desc: 'session ended early (kill / close)' };
+        default:          return { color: 'killed',    label: s||'?',     desc: '' };
       }
     }
-
-    function modeLabel(s) {
-      return s.mode === 'run' ? 'run' : 'pipe';
+    const isActive = s => s === 'streaming' || s === 'awaiting';
+    function splitName(n) {
+      const m = n.match(/^(.*)(-[0-9a-z]{4})$/);
+      return m ? { word: m[1], suffix: m[2] } : { word: n, suffix: '' };
     }
-
-    // Must match isActive() in cmd/spout/cmd/status.go.
-    function isActive(status) {
-      return status === 'streaming' || status === 'awaiting';
+    // Minimal row: status + name + mode-tag + humanized time. Bytes/lines/
+    // duration live on the run page when you click in. Job shows as a slash-
+    // prefixed path (`ml-training / umber-ikvn`) — same vocabulary as the
+    // breadcrumb on the run page.
+    function renderPath(job, name, suffix) {
+      const job_ = job ? `<span class="path-job">${esc(job)}</span><span class="path-sep">/</span>` : '';
+      const suf = suffix ? `<span class="path-suffix">${esc(suffix)}</span>` : '';
+      return `<span class="path">${job_}<span class="path-run">${esc(name)}${suf}</span></span>`;
     }
-
     function renderRun(s) {
       const info = statusInfo(s.status);
+      const nm = splitName(s.name);
+      const mode = s.mode === 'run' ? 'run' : 'pipe';
       return `
-        <a class="run" href="/r/${s.name}">
+        <a class="run" href="/r/${encodeURIComponent(s.name)}">
           <span class="dot-wrap">
             <span class="dot dot-${info.color}"></span>
-            <span class="dot-tip">
-              <div class="dot-tip-label">${info.label}</div>
-              ${info.desc ? `<div class="dot-tip-desc">${info.desc}</div>` : ''}
-            </span>
+            <span class="dot-tip">${esc(info.label)}<div class="desc">${esc(info.desc)}</div></span>
           </span>
-          <span class="run-info">
-            <div class="run-name">${displayName(s.name)}</div>
-            <div class="run-meta">
-              <span class="run-mode">${modeLabel(s)}</span>
-              <span class="run-time" title="${s.started_at}">${humanTimestamp(s.started_ms)}</span>
-            </div>
+          ${renderPath(s.job, nm.word, nm.suffix)}
+          <span class="run-tag">${esc(mode)}</span>
+          <span class="run-meta">${humanTime(s.started_ms)}</span>
+        </a>`;
+    }
+    // A row inside a multi-stream run group: uses the stream label as the name.
+    function renderStream(s) {
+      const info = statusInfo(s.status);
+      return `
+        <a class="run stream" href="/r/${encodeURIComponent(s.name)}">
+          <span class="dot-wrap">
+            <span class="dot dot-${info.color}"></span>
+            <span class="dot-tip">${esc(info.label)}<div class="desc">${esc(info.desc)}</div></span>
           </span>
-          <span class="run-bytes">${humanDuration(s.duration_ms)}</span>
+          <span class="run-name">${esc(s.label || s.name)}</span>
+          <span class="run-meta">${humanTime(s.started_ms)}</span>
         </a>`;
     }
 
-    async function load() {
-      const el = document.getElementById('runs');
-      try {
-        const res = await fetch('/api/runs');
-        const runs = await res.json();
-
-        if (!runs || runs.length === 0) {
-          el.innerHTML = '<div class="empty">No runs yet.<br><br>Start one with <code>command | spout</code> or <code>spout run command</code></div>';
-          return;
+    // Render the list in chronological order. Multi-stream runs collapse into
+    // one "group" entry containing their streams; jobs ride as a tag on the row
+    // (no separate job section), so single runs and multi-stream runs live
+    // side-by-side ordered by time.
+    function renderGrouped(list) {
+      const groups = new Map(); // runKey → [sessions]
+      const entries = [];       // { ts, kind: 'single' | 'group', ... }
+      for (const r of list) {
+        if (r.run) {
+          if (!groups.has(r.run)) groups.set(r.run, []);
+          groups.get(r.run).push(r);
+        } else {
+          entries.push({ ts: r.started_ms || 0, kind: 'single', s: r });
         }
-
-        const active = runs.filter(r => isActive(r.status));
-        const ended = runs.filter(r => !isActive(r.status));
-
-        let html = '';
-        if (active.length > 0) {
-          html += `<div class="section-label">active<span class="section-count">${active.length}</span></div>`;
-          html += active.map(renderRun).join('');
-        }
-        if (ended.length > 0) {
-          html += `<div class="section-label">ended<span class="section-count">${ended.length}</span></div>`;
-          html += ended.map(renderRun).join('');
-        }
-        el.innerHTML = html;
-      } catch (e) {
-        el.innerHTML = '<div class="empty">Failed to load runs.</div>';
       }
+      for (const [runKey, streams] of groups) {
+        if (streams.length === 1) {
+          entries.push({ ts: streams[0].started_ms || 0, kind: 'single', s: streams[0] });
+          continue;
+        }
+        streams.sort((a, b) => (a.label || '').localeCompare(b.label || ''));
+        const ts = Math.max(...streams.map(s => s.started_ms || 0));
+        entries.push({ ts, kind: 'group', runKey, streams });
+      }
+      entries.sort((a, b) => b.ts - a.ts);
+
+      let html = '';
+      for (const e of entries) {
+        if (e.kind === 'single') { html += renderRun(e.s); continue; }
+        const first = e.streams[0];
+        html += `
+          <div class="run-group">
+            <div class="group-head">
+              <span class="dot-wrap"><span class="dot dot-${statusInfo(first.status).color}"></span></span>
+              ${renderPath(first.job, e.runKey, '')}
+              <span class="group-count">${e.streams.length} streams</span>
+              <span class="run-meta">${humanTime(first.started_ms)}</span>
+            </div>
+            ${e.streams.map(renderStream).join('')}
+          </div>`;
+      }
+      return html;
     }
 
-    load();
-    setInterval(load, 2000);
+    // ───────── runs poll ─────────
+    const runsEl = document.getElementById('runs');
+    const runsCount = document.getElementById('runs-count');
+    let lastRunsHTML = '';
+
+    async function loadRuns() {
+      let runs;
+      try {
+        const r = await fetch('/api/runs');
+        if (!r.ok) return;
+        runs = await r.json();
+      } catch { return; }
+
+      let html, count = 0;
+      if (!runs || runs.length === 0) {
+        html = `<div class="empty">no runs yet —<br>start one with <code>command | spout</code> or <code>spout run command</code></div>`;
+      } else {
+        const live = runs.filter(r => isActive(r.status));
+        const ended = runs.filter(r => !isActive(r.status));
+        count = runs.length;
+        const part = (title, list) => list.length
+          ? `<div class="subhead">${title}<span class="rule"></span><span class="count">${list.length}</span></div>` + renderGrouped(list)
+          : '';
+        html = part('active', live) + part('ended', ended);
+      }
+      runsCount.textContent = count;
+      // Only touch the DOM on change — keeps hover tooltips alive across the 2s poll.
+      if (html !== lastRunsHTML) { runsEl.innerHTML = html; lastRunsHTML = html; }
+    }
+    loadRuns();
+    setInterval(loadRuns, 2000);
+
+    // Hide the "log out" link when accessed locally (same box = no session
+    // to log out of). Show it only for remote sessions backed by the cookie.
+    // Also nudge the user toward setting up remote access when they haven't.
+    fetch('/api/admin/whoami')
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (!d) return;
+        if (d.local) {
+          const link = document.querySelector('.logout');
+          if (link) link.style.display = 'none';
+        }
+        if (d.local && !d.remote_login_ready) {
+          // Tiny in-place hint pulled onto the title-strip on the right.
+          const tag = document.querySelector('.frame-head .tag');
+          if (tag) {
+            tag.innerHTML = '<b>self-hosted</b> · <span title="set SPOUT_ADMIN_PASSWORD then restart `spout server` to enable /admin/login from any device" style="cursor:help;color:var(--dimmer)">remote: off</span>';
+          }
+        }
+      })
+      .catch(() => {});
+
+    // ───────── tokens (admin only — panel stays hidden when forbidden) ─────────
+    const tokensSection = document.getElementById('tokens-section');
+    const tokensEl = document.getElementById('tokens');
+    const tokensCount = document.getElementById('tokens-count');
+    const tokenNew = document.getElementById('token-new');
+
+    function maskToken(t) {
+      return t.length > 16 ? t.slice(0, 10) + '…' + t.slice(-4) : t;
+    }
+
+    async function loadTokens() {
+      let tokens;
+      try {
+        const r = await fetch('/api/tokens');
+        if (!r.ok) return; // not admin — leave the section hidden
+        tokens = await r.json();
+      } catch { return; }
+      tokensSection.style.display = '';
+      tokensCount.textContent = tokens.length;
+
+      if (!tokens.length) {
+        tokensEl.innerHTML = `<div class="empty" style="padding:14px 8px">no ingest tokens. same-box senders need none; create one for a remote machine.</div>`;
+        return;
+      }
+      tokensEl.innerHTML = tokens.map(t => `
+        <div class="token-row">
+          <span class="token-label">${esc(t.label)}</span>
+          <span class="token-val">${esc(maskToken(t.token))}</span>
+          <span class="token-date">${new Date(t.created).toLocaleDateString([], { month:'short', day:'numeric' })}</span>
+          <button class="btn btn-danger" data-revoke="${esc(t.label)}">revoke</button>
+        </div>`).join('');
+      tokensEl.querySelectorAll('[data-revoke]').forEach(b =>
+        b.onclick = () => revokeToken(b.getAttribute('data-revoke')));
+    }
+
+    async function createToken() {
+      const input = document.getElementById('token-label');
+      const label = input.value.trim();
+      if (!label) return;
+      const res = await fetch('/api/tokens', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label }),
+      });
+      if (!res.ok) { alert('create failed: ' + (await res.text())); return; }
+      const e = await res.json();
+      input.value = '';
+      tokenNew.style.display = '';
+      tokenNew.innerHTML = `
+        <div>new token <b>${esc(e.label)}</b> — copy it now, it won't be shown again:</div>
+        <div class="tok">${esc(e.token)}</div>
+        <div class="copy-row">
+          <button class="btn btn-primary" id="copy-new">copy</button>
+          <span class="ok" id="copy-ok" style="display:none">copied</span>
+          <span style="flex:1"></span>
+          <button class="btn" id="dismiss-new">dismiss</button>
+        </div>`;
+      document.getElementById('copy-new').onclick = () => {
+        navigator.clipboard.writeText(e.token);
+        const ok = document.getElementById('copy-ok');
+        ok.style.display = '';
+        setTimeout(() => { ok.style.display = 'none'; }, 1500);
+      };
+      document.getElementById('dismiss-new').onclick = () => { tokenNew.style.display = 'none'; };
+      loadTokens();
+    }
+
+    async function revokeToken(label) {
+      if (!confirm('revoke "' + label + '"? anything sending with it will stop working.')) return;
+      // POST with the label in the body — bypasses any URL-encoding fragility.
+      const res = await fetch('/api/tokens/revoke', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label }),
+      });
+      if (!res.ok) {
+        alert('revoke failed: ' + res.status + ' — ' + (await res.text()));
+        return;
+      }
+      loadTokens();
+    }
+
+    document.getElementById('token-add').onclick = createToken;
+    document.getElementById('token-label').addEventListener('keydown', e => {
+      if (e.key === 'Enter') createToken();
+    });
+    loadTokens();
+    setInterval(loadTokens, 5000);
   </script>
 </body>
 </html>

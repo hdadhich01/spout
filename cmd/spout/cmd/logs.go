@@ -3,37 +3,46 @@ package cmd
 import (
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 
 	"github.com/spf13/cobra"
 )
 
 var logsCmd = &cobra.Command{
-	Use:               "logs <name>",
-	Short:             "Print a run's output",
-	Long: `Replay a run's terminal output to stdout. Includes ANSI colors.
+	Use:   "logs [run] [stream]",
+	Short: "Print a run's output from the local copy",
+	Long: `Replay a run's output (ANSI colors preserved). Reads the local copy only.
 
   spout logs ember
-  spout logs ember | less -R
-  spout logs ember > output.txt`,
-	Args:              cobra.ExactArgs(1),
+  spout logs exp-2/training            # one stream
+  spout logs ember | less -R`,
+	Args:              cobra.RangeArgs(0, 2),
 	ValidArgsFunction: completeTmuxSessions,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		addr, found := findRunServer(args[0])
-		if !found {
-			return fmt.Errorf("run %s not found on any known server", cBold(args[0]))
-		}
-		url := fmt.Sprintf("http://%s/api/run/%s/raw", addr, args[0])
-		resp, err := http.Get(url)
+		local, _, err := openLocal()
 		if err != nil {
-			return fmt.Errorf("fetching logs: %w", err)
+			return err
 		}
-		defer resp.Body.Close()
-		if resp.StatusCode != 200 {
-			return fmt.Errorf("status %d", resp.StatusCode)
+
+		if len(args) == 0 {
+			picked, perr := pickLocalRun(local, "read")
+			if perr != nil {
+				return perr
+			}
+			args = []string{picked}
 		}
-		_, err = io.Copy(os.Stdout, resp.Body)
+
+		sess, err := resolveLocalSingle(local, args)
+		if err != nil {
+			return err
+		}
+
+		f, err := os.Open(local.DataPath(sess.Name))
+		if err != nil {
+			return fmt.Errorf("opening local copy: %w", err)
+		}
+		defer f.Close()
+		_, err = io.Copy(os.Stdout, f)
 		return err
 	},
 }

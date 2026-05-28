@@ -1,14 +1,14 @@
-# spout.yaml - project config (playground template)
+# spout.yaml - project config (playground)
 #
 # Discovered automatically by walking up from cwd to the git root.
-# Overrides ~/.config/spout/spout.yaml on conflicts.
-# See docs/config.md for the authoritative field reference.
-# Safe to commit - tokens go in .env, not here.
+# Overrides ~/.config/spout/spout.yaml on conflicts (deepest wins).
+# Safe to commit — tokens go in .env, not here.
+# See docs/cli/config.md for the field reference.
 
 # Server to use for runs from this project.
 server: localhost:3000
 
-# The overarching name for this cluster of runs (groups them on the dashboard).
+# Dashboard grouping label (all runs from this dir share it).
 job: ml-training
 
 # Template for sequential run names. Defaults to word-xxxx when omitted.
@@ -20,68 +20,85 @@ job: ml-training
 #   {time}       now (HH-mm-ss)
 #   {ts}         Unix timestamp
 #   {t:FORMAT}   custom datetime, e.g. {t:YYYY-MM-DD}, {t:dd/MM HH:mm}
-#                Tokens: YYYY YY MM DD dd HH hh mm ss (Moment/Java style)
 run_name: "exp-{n}"
 
 # ──────────────────────────────────────────────────────────────
-# WATCHDOG / NOTIFICATIONS (opt-in, parsed but not yet executed)
-# Requires you to bring your own model or CLI tool.
-# Works with Tier 2 (spout.sh + E2E) and Tier 3 (local server).
+# OBSERVE — opt-in LLM observability
+#
+# When enabled, spout's CLI taps each run's output, cheaply
+# pre-filters it, and asks a model to characterize the run.
+# It emits structured events (status, metrics, end-of-run
+# synthesis, and built-in loop/drift/amnesia detectors for
+# agent runs). Events show up live in the dashboard's right-
+# hand observe panel and are written to events.jsonl locally.
+#
+# Without a key, observe runs in "stub mode" — it tracks byte
+# counts and heuristically classifies the run type, no LLM call.
+# Set ANTHROPIC_API_KEY in your ~/.config/spout/.env (or the env
+# var named by model.token) to get real AI summaries + detectors.
+#
+# Privacy: type: api sends recent output to the model provider.
+# For E2E (Tier 2) runs, use type: local (Ollama) to stay on-box.
+# Per-run overrides: --observe / --no-observe / --otel.
 # ──────────────────────────────────────────────────────────────
 
-watch:
+observe:
     enabled: true
-    default_interval: 2m # Fallback if a rule doesn't specify one
+    default_interval: 60s   # how often to check; the model may adjust this
 
-    # The model/CLI the watchdog should use.
-    # Options: local (Ollama/LM Studio), api (Gemini/OpenAI), or cli.
     model:
-        type: local
-        endpoint: http://localhost:11434 # Ollama default. Change if using LM Studio, vLLM, etc.
+        type: api                  # api (cloud) | local (Ollama) | cli
+        model: claude-haiku-4-5
+        # token: ANTHROPIC_API_KEY      # env-var NAME holding the key (default)
+        # endpoint: http://localhost:11434   # only when type: local
 
-    # Rules define what to watch for. Each rule gets its own monitoring loop.
-    # Every `sources` entry must match a stream `label` defined below
-    # (the parser enforces this).
+    # Built-in detectors run with zero config when observe is on.
+    # Uncomment to disable any.
+    # detectors:
+    #     classify: true    # auto-detect run type (build/training/agent/...)
+    #     loop: true        # repeated failing action/error with no progress
+    #     drift: true       # agent diverging from its stated goal
+    #     amnesia: true     # agent re-asks/re-does settled work
+
+    # Custom prompts — folded into the SAME LLM call as the built-ins,
+    # so they cost almost nothing extra. `sources` (optional) must match
+    # a stream `label` below — the parser enforces it.
     rules:
         - name: high-memory
-          prompt: "Alert immediately if memory usage > 80%, swap is being used, or there are signs of OOM risk. Also watch GPU memory."
+          prompt: "Alert if memory > 80%, swap is being used, or signs of OOM."
           interval: 60s
           sources: [system-monitor, gpu]
 
         - name: training-stuck
-          prompt: "Alert if training appears stuck: loss has not meaningfully decreased for 3+ epochs, GPU utilization is below 30% for more than 2 minutes, or learning rate has collapsed."
+          prompt: "Alert if loss hasn't decreased for 3+ epochs or GPU util < 30% for 2+ min."
           interval: 3m
           sources: [training, gpu]
 
         - name: nan-or-divergence
-          prompt: "Alert aggressively on NaN values, exploding loss, or any sign the training run is diverging."
+          prompt: "Alert on NaN values, exploding loss, or training divergence."
           interval: 30s
           sources: [training]
 
+    # otel: http://localhost:4318    # also export events as OTLP/HTTP spans
+
 # ──────────────────────────────────────────────────────────────
-# STREAMS
-# The absolute source of truth for what gets executed.
-# Bare `spout` spins these up into discrete tmux panes.
-# Each stream's `dir:` is resolved relative to this yaml file.
+# STREAMS — multi-pane runs launched by bare `spout`.
+# Each stream's `dir:` is relative to this yaml file.
 # ──────────────────────────────────────────────────────────────
 streams:
-    # Primary ML training process.
     - label: training
-      command: python train.py --epochs 200 --lr 0.001
+      command: python train.py --epochs 200
       dir: ./src/models
       env:
           CUDA_VISIBLE_DEVICES: "0"
           BATCH_SIZE: "64"
 
-    # Companion: GPU monitoring (referenced by high-memory and training-stuck).
     - label: gpu
       command: watch -n 2 nvidia-smi
 
-    # Companion: System monitoring (referenced by high-memory).
     - label: system-monitor
       command: htop -d 5
 
-    # Companion: UI/Dashboard (not monitored by watchdog).
     - label: ui
       command: tensorboard --logdir ./logs
       dir: ./src/models

@@ -33,3 +33,9 @@ bin/
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Agent / tool state (local only, not part of the repo)
+.claude/
+.agents/
+.emdash/
+skills-lock.json

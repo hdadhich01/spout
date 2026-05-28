@@ -143,13 +143,16 @@ func indentFlags(usage string) string {
 func defaultHelp(c *cobra.Command) {
 	fmt.Fprintln(stderr)
 
-	// Description: first paragraph of Long, or Short if no Long.
+	// Description: first paragraph of Long, or Short if no Long. Wrap at
+	// 76 columns + 2-char indent so it stays inside an 80-col terminal.
 	desc, examples := splitLong(c.Long)
 	if desc == "" {
 		desc = c.Short
 	}
 	if desc != "" {
-		fmt.Fprintf(stderr, "  %s\n", cDim(desc))
+		for _, line := range wrapText(desc, 76) {
+			fmt.Fprintf(stderr, "  %s\n", cDim(line))
+		}
 	}
 
 	section("usage")
@@ -176,6 +179,28 @@ func defaultHelp(c *cobra.Command) {
 		fmt.Fprint(stderr, indentFlags(c.InheritedFlags().FlagUsages()))
 	}
 	fmt.Fprintln(stderr)
+}
+
+// wrapText breaks `text` into lines no longer than `width`. Words longer
+// than width keep their own line. Used to keep help descriptions inside
+// an 80-col terminal regardless of how long the Long field is.
+func wrapText(text string, width int) []string {
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return nil
+	}
+	var lines []string
+	cur := words[0]
+	for _, w := range words[1:] {
+		if len(cur)+1+len(w) > width {
+			lines = append(lines, cur)
+			cur = w
+		} else {
+			cur += " " + w
+		}
+	}
+	lines = append(lines, cur)
+	return lines
 }
 
 // splitLong takes a Long help text and splits it into a description (first

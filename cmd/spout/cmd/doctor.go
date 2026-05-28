@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/hdadhich01/spout/internal/config"
@@ -25,125 +24,115 @@ var doctorCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg := config.Load()
 
-		section("checks")
+		// --- setup: install + system tools + project config file ---
+		var setup []row
 
-		// Binary / version
 		version, rev := versionInfo()
 		binPath, _ := os.Executable()
 		vstr := version
 		if rev != "" {
-			vstr += cDim(" ("+rev+")")
+			vstr += cDim(" (" + rev + ")")
 		}
 		if binPath != "" {
 			vstr += "  " + cDim(shortPath(binPath))
 		}
-		pass("version", vstr)
+		setup = append(setup, row{markOk(), "version", vstr})
 
-		// tmux
 		if _, err := exec.LookPath("tmux"); err == nil {
-			pass("tmux", cGreen("found"))
+			setup = append(setup, row{markOk(), "tmux", cGreen("found")})
 		} else {
-			fail2("tmux", cRed("not found")+" - `spout run` won't work")
+			setup = append(setup, row{markFail(), "tmux", cRed("not found") + cDim(" (`spout run` won't work)")})
 		}
 
-		// Clipboard
-		clipTool := detectClipboard()
-		if clipTool != "" {
-			pass("clipboard", clipTool+" "+cGreen("found"))
+		if t := detectClipboard(); t != "" {
+			setup = append(setup, row{markOk(), "clipboard", t + " " + cGreen("found")})
 		} else {
-			warn2("clipboard", cYellow("no tool found")+" - auto-copy disabled")
+			setup = append(setup, row{markWarn(), "clipboard", cYellow("no tool found") + cDim(" (auto-copy disabled)")})
 		}
 
-		// Browser opener
-		opener := detectBrowserOpener()
-		if opener != "" {
-			pass("browser", opener+" "+cGreen("found"))
+		if t := detectBrowserOpener(); t != "" {
+			setup = append(setup, row{markOk(), "browser", t + " " + cGreen("found")})
 		} else {
-			warn2("browser", cYellow("no opener found")+" - `spout open` won't work")
+			setup = append(setup, row{markWarn(), "browser", cYellow("no opener found") + cDim(" (`spout open` won't work)")})
 		}
 
-		// Config file
 		sysPath := config.SystemPath()
-		if _, err := os.Stat(sysPath); err == nil {
-			pass("config", cAqua(shortPath(sysPath)))
-		} else if os.IsNotExist(err) {
-			warn2("config", cYellow("no system config")+" (run `spout login` to create one)")
-		} else {
-			fail2("config", cRed(err.Error()))
+		switch _, err := os.Stat(sysPath); {
+		case err == nil:
+			setup = append(setup, row{markOk(), "config", cAqua(shortPath(sysPath))})
+		case os.IsNotExist(err):
+			setup = append(setup, row{markWarn(), "config", cYellow("no system config") + cDim(" (run `spout login` to create one)")})
+		default:
+			setup = append(setup, row{markFail(), "config", cRed(err.Error())})
 		}
 
-		// Schema validation (foreign keys + model endpoint requirement)
 		if err := cfg.Validate(); err != nil {
-			fail2("schema", cRed(err.Error()))
+			setup = append(setup, row{markFail(), "schema", cRed(err.Error())})
 		} else {
-			pass("schema", cGreen("valid"))
+			setup = append(setup, row{markOk(), "schema", cGreen("valid")})
 		}
 
-		// Server reachability + compatibility
+		section("setup")
+		printRows(setup)
+
+		// --- server: reachability, optional auth, local copy path ---
+		var server []row
 		addr, _ := resolveServer()
 		ok, reachable, authRequired, code := probeSpout(addr)
 		switch {
 		case !reachable:
-			fail2("server", fmt.Sprintf("%s  %s", addr, cRed("unreachable")))
+			server = append(server, row{markFail(), "url", fmt.Sprintf("%s  %s", addr, cRed("unreachable"))})
 		case authRequired:
-			warn2("server", fmt.Sprintf("%s  %s", addr, cYellow("auth required")))
+			server = append(server, row{markWarn(), "url", fmt.Sprintf("%s  %s", addr, cYellow("auth required"))})
 		case ok:
-			pass("server", fmt.Sprintf("%s  %s", addr, cGreen("compatible")))
+			server = append(server, row{markOk(), "url", fmt.Sprintf("%s  %s", addr, cGreen("compatible"))})
 		case code == 200:
-			fail2("server", fmt.Sprintf("%s  %s", addr, cRed("not compatible")))
+			server = append(server, row{markFail(), "url", fmt.Sprintf("%s  %s", addr, cRed("not compatible"))})
 		default:
-			warn2("server", fmt.Sprintf("%s  %s %d", addr, cYellow("status"), code))
+			server = append(server, row{markWarn(), "url", fmt.Sprintf("%s  %s %d", addr, cYellow("status"), code)})
 		}
 
-		// Token (only when the resolved server profile declares one,
-		// since the plain SPOUT_TOKEN fallback is expected to be absent
-		// on no-auth local dev).
 		if profile := profileFor(cfg, addr); profile != "" {
 			if srv, haveSrv := cfg.Servers[profile]; haveSrv && srv.Token != "" {
 				if v := os.Getenv(srv.Token); v != "" {
-					pass("token", cAqua(srv.Token)+" "+cGreen("set"))
+					server = append(server, row{markOk(), "token", cAqua(srv.Token) + " " + cGreen("set")})
 				} else {
-					warn2("token", cAqua(srv.Token)+" "+cYellow("unset")+" (set it in ~/.config/spout/.env)")
+					server = append(server, row{markWarn(), "token", cAqua(srv.Token) + " " + cYellow("unset") + cDim(" (set it in ~/.config/spout/.env)")})
 				}
 			}
 		}
 
-		// Storage: path + writable + free disk
-		storagePath := config.DefaultStorageDir()
-		if cfg.Storage != "" {
-			storagePath = expandHome(cfg.Storage)
-		}
-		if err := os.MkdirAll(storagePath, 0755); err != nil {
-			fail2("storage", fmt.Sprintf("%s  %s", cAqua(shortPath(storagePath)), cRed(err.Error())))
-		} else if !isWritable(storagePath) {
-			fail2("storage", fmt.Sprintf("%s  %s", cAqua(shortPath(storagePath)), cRed("not writable")))
+		localPath := cfg.ResolveLocal()
+		if err := os.MkdirAll(localPath, 0755); err != nil {
+			server = append(server, row{markFail(), "local", fmt.Sprintf("%s  %s", cAqua(shortPath(localPath)), cRed(err.Error()))})
+		} else if !isWritable(localPath) {
+			server = append(server, row{markFail(), "local", fmt.Sprintf("%s  %s", cAqua(shortPath(localPath)), cRed("not writable"))})
 		} else {
-			free := diskFree(storagePath)
-			pass("storage", fmt.Sprintf("%s  %s free", cAqua(shortPath(storagePath)), cGreen(free)))
+			server = append(server, row{markOk(), "local", cAqua(shortPath(localPath))})
 		}
 
-		// Streams preflight - only when the merged config defines any.
+		section("server")
+		printRows(server)
+
+		// --- streams: per-stream preflight (only when configured) ---
 		if n := len(cfg.Streams); n > 0 {
 			issues := preflightStreams(cfg.Streams)
-			if len(issues) == 0 {
-				pass("streams", fmt.Sprintf("%d %s", n, cGreen("ready")))
-			} else {
-				fail2("streams", fmt.Sprintf("%d defined, %s", n, cRed(fmt.Sprintf("%d issue(s)", len(issues)))))
-				for _, msg := range issues {
-					fmt.Fprintf(stderr, "              %s %s\n", cRed("✗"), msg)
-				}
+			countStr := fmt.Sprintf("%d", n)
+			if len(issues) > 0 {
+				countStr = fmt.Sprintf("%d, %s", n, cRed(fmt.Sprintf("%d issue(s)", len(issues))))
 			}
+			section(fmt.Sprintf("streams  %s", cDim("("+countStr+")")))
+			printRows(streamRows(cfg.Streams, issues))
 		}
 
-		// Watch endpoint (only when watch is enabled with a local model)
-		if cfg.Watch != nil && cfg.Watch.Enabled &&
-			cfg.Watch.Model != nil && cfg.Watch.Model.Type == "local" &&
-			cfg.Watch.Model.Endpoint != "" {
-			ep := cfg.Watch.Model.Endpoint
-			if probeWatchEndpoint(ep) {
-				pass("watch", fmt.Sprintf("%s  %s", cAqua(ep), cGreen("reachable")))
+		// --- observe: only when enabled with a local model ---
+		if cfg.Observe != nil && cfg.Observe.Enabled && cfg.Observe.ModelType() == "local" {
+			ep := cfg.Observe.Endpoint()
+			section("observe")
+			if probeObserveEndpoint(ep) {
+				printRows([]row{{markOk(), "endpoint", fmt.Sprintf("%s  %s", cAqua(ep), cGreen("reachable"))}})
 			} else {
-				fail2("watch", fmt.Sprintf("%s  %s", cAqua(ep), cRed("unreachable")))
+				printRows([]row{{markFail(), "endpoint", fmt.Sprintf("%s  %s", cAqua(ep), cRed("unreachable"))}})
 			}
 		}
 
@@ -152,29 +141,63 @@ var doctorCmd = &cobra.Command{
 	},
 }
 
-// pass / warn2 / fail2 share the same layout. If the value already contains
-// ANSI escapes the caller has done its own coloring and we print as-is;
-// otherwise the whole value gets the severity hue.
-func checkRow(mark, name, value string, hue func(string) string) {
-	if !strings.Contains(value, "\x1b[") {
-		value = hue(value)
+// streamRows turns the merged config's streams + the preflight issue list
+// into a row per stream, marking only the failing ones with ✗. The
+// per-stream issue text (`dir … does not exist` etc.) becomes the value.
+func streamRows(streams []config.Stream, issues []string) []row {
+	// Index issues by stream label. preflightStreams emits messages of the
+	// form "[<label>] <body>" — pull <label> back out so we can match.
+	issueFor := map[string]string{}
+	for _, m := range issues {
+		if !strings.HasPrefix(m, "[") {
+			continue
+		}
+		end := strings.Index(m, "]")
+		if end < 0 {
+			continue
+		}
+		// Strip ANSI from the label component (preflight wraps it in cBold).
+		labelANSI := m[1:end]
+		labelClean := stripANSI(labelANSI)
+		body := strings.TrimSpace(m[end+1:])
+		issueFor[labelClean] = body
 	}
-	fmt.Fprintf(stderr, "  %s %s  %s\n", mark, cAqua(cBold(rpad(name, labelWidth))), value)
+	out := make([]row, 0, len(streams))
+	for _, s := range streams {
+		if body, bad := issueFor[s.Label]; bad {
+			out = append(out, row{markFail(), s.Label, body})
+		} else {
+			out = append(out, row{markOk(), s.Label, cDim("ready")})
+		}
+	}
+	return out
 }
 
-func pass(name, value string)  { checkRow(cGreen("✓"), name, value, cGreen) }
-func warn2(name, value string) { checkRow(cYellow("!"), name, value, cYellow) }
-func fail2(name, value string) { checkRow(cRed("✗"), name, value, cRed) }
-
-func rpad(s string, n int) string {
-	if len(s) >= n {
-		return s
+// stripANSI removes CSI escape sequences (`\x1b[…<final>`) so we can
+// match raw labels back to their preflight messages. Cheap version —
+// good enough for the colors color.go emits.
+func stripANSI(s string) string {
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); {
+		if s[i] == '\x1b' {
+			i++ // ESC
+			if i < len(s) && s[i] == '[' {
+				i++ // [
+			}
+			// Consume params until the final byte (0x40..0x7e).
+			for i < len(s) {
+				c := s[i]
+				i++
+				if c >= 0x40 && c <= 0x7e {
+					break
+				}
+			}
+			continue
+		}
+		out = append(out, s[i])
+		i++
 	}
-	pad := ""
-	for i := 0; i < n-len(s); i++ {
-		pad += " "
-	}
-	return s + pad
+	return string(out)
 }
 
 func detectClipboard() string {
@@ -260,16 +283,6 @@ func isWritable(dir string) bool {
 	return true
 }
 
-// diskFree returns the free space at path as a human-readable string.
-// Falls back to "?" if the syscall fails (some weird filesystems).
-func diskFree(path string) string {
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(path, &stat); err != nil {
-		return "?"
-	}
-	return humanBytes(int64(stat.Bavail) * int64(stat.Bsize))
-}
-
 // profileFor returns the first server profile whose URL matches addr.
 // Empty string if no profile is in play (raw host:port, or no servers map).
 func profileFor(cfg config.Config, addr string) string {
@@ -346,10 +359,10 @@ func isShellKeyword(tok string) bool {
 	return false
 }
 
-// probeWatchEndpoint does a best-effort reachability check on a local LLM
+// probeObserveEndpoint does a best-effort reachability check on a local LLM
 // endpoint. Any HTTP response (including 404) counts as "something is
 // listening"; only connection / DNS failures count as unreachable.
-func probeWatchEndpoint(url string) bool {
+func probeObserveEndpoint(url string) bool {
 	client := http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {

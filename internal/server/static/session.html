@@ -4,166 +4,441 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>spout</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.min.css">
-  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/lib/xterm.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0/lib/addon-fit.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0/lib/addon-web-links.min.js"></script>
+  <link rel="icon" href="/static/favicon.svg">
+  <!-- xterm.js is vendored (web/static/vendor/) and embedded in the
+       binary, so the dashboard works fully offline — no CDN dependency. -->
+  <link rel="stylesheet" href="/static/vendor/xterm.min.css">
+  <script src="/static/vendor/xterm.min.js"></script>
+  <script src="/static/vendor/addon-fit.min.js"></script>
+  <script src="/static/vendor/addon-web-links.min.js"></script>
   <style>
+    /* ─────────────────────────────────────────────────────────────────
+       spout — run viewer. Same TUI-panel design language as /admin:
+       monospace, thin aqua-tinted borders, brackets/labels for tags.
+       The observe panel CSS lower down is the established design;
+       this is just the top chrome.
+       ───────────────────────────────────────────────────────────────── */
+    :root {
+      --bg: #0a0a0a;
+      --panel: #0e0e0e;
+      --panel-2: #131313;
+      --term-bg: #050505;       /* terminal frame inner — slightly darker for depth */
+      --border: #383838;
+      --border-hi: #4a4a4a;
+      --aqua: #5ac8e2;
+      --aqua-dim: #2d6573;
+      --text: #ededed;
+      --dim: #9a9a9a;
+      --dimmer: #6a6a6a;
+      --c-streaming: #22c55e;
+      --c-awaiting:  #eab308;
+      --c-success:   #166534;
+      --c-error:     #b91c1c;
+      --c-killed:    #6a6a6a;
+      --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+    }
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { height: 100%; background: #0a0a0a; overflow: hidden; display: flex; flex-direction: column; }
+    html, body {
+      height: 100%; background: var(--bg);
+      display: flex; flex-direction: column;
+      color: var(--text);
+      font-family: 'SF Mono', 'JetBrains Mono', 'Cascadia Code', 'Menlo', monospace;
+      /* The terminal is fixed-width (120 cols, matches tmux). On narrow
+         viewports we let the page scroll horizontally instead of squeezing
+         xterm into a width the running program doesn't expect. */
+      overflow-y: hidden;
+      overflow-x: auto;
+    }
 
+    /* Top strip: just nav + brand + copy actions. Run state lives in the
+       terminal title bar below. */
     #status-bar {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 12px;
-      background: #111;
-      border-bottom: 1px solid #222;
-      font-family: -apple-system, system-ui, sans-serif;
+      display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+      padding: 10px 16px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
       font-size: 12px;
       flex-shrink: 0;
     }
+    #back { color: var(--dim); text-decoration: none; font-size: 12px; transition: color 160ms var(--ease-out); }
+    #back:hover { color: var(--aqua); }
+    .head-rule { flex: 1; height: 1px; background: var(--border); min-width: 12px; }
 
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      border-radius: 4px;
-      overflow: hidden;
-      font-weight: 500;
+    /* Breadcrumb: job / run / stream. Same vocabulary as the dashboard's
+       multi-stream group headers, so the hierarchy reads consistently. */
+    .crumbs { display: flex; align-items: center; gap: 8px; font-size: 12px; min-width: 0; overflow: hidden; }
+    .crumb-job, .crumb-run { color: var(--dim); white-space: nowrap; }
+    .crumb-leaf { color: var(--aqua); font-weight: 500; white-space: nowrap; }
+    .crumb-sep { color: var(--dimmer); }
+
+    /* Terminal title bar internals — clean inline layout, no bracketed badges:
+         ●●●   $ ping abc.com           ● streaming · <1m · 50L · 5KB · host · branch
+       Command (left, flex) truncates with ellipsis; meta sits flush right. */
+    /* "user@host" — small dim text right of the traffic lights, no chrome.
+       It's just context, not interactive. */
+    .term-user {
+      font-size: 11px;
+      color: var(--dim);
+      flex-shrink: 0;
     }
-    .badge-label { padding: 2px 6px; background: #333; color: #aaa; }
-    .badge-value { padding: 2px 8px; }
-    /* Status colors - must match index.html dots and CLI color.go.
-       streaming=green, awaiting=yellow, success=darkgreen, error=red, ended=gray. */
-    .badge-green .badge-value     { background: #166534; color: #dcfce7; }
-    .badge-yellow .badge-value    { background: #854d0e; color: #fef9c3; }
-    .badge-darkgreen .badge-value { background: #166534; color: #dcfce7; }
-    .badge-red .badge-value       { background: #7f1d1d; color: #fee2e2; }
-    .badge-gray .badge-value      { background: #374151; color: #d1d5db; }
+    .term-user b { color: var(--text); font-weight: 500; }
 
-    /* Hover popup over the status badge explaining the current state. */
-    #badge-status-wrap { position: relative; cursor: help; }
-    .badge-tip {
+    /* The command — given the code-chip treatment (bordered + bg) so it
+       reads as "this is what's running" at a glance. */
+    .term-cmd {
+      flex: 1; min-width: 0;
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px; color: var(--text); font-weight: 500;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      padding: 3px 10px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+    }
+    .term-cmd .dollar { color: var(--aqua); font-weight: 600; flex-shrink: 0; }
+    .term-cmd #term-cmd-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .term-meta {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 11px; color: var(--dim);
+      flex-shrink: 0;
+      white-space: nowrap;
+    }
+    .term-meta .sep { color: var(--dimmer); }
+    .term-meta #meta-extra { display: contents; }      /* host/branch slot, JS-populated */
+
+    .status-pill {
+      display: inline-flex; align-items: center; gap: 5px;
+      position: relative; cursor: help;
+    }
+    .status-pill #status-dot { width: 8px; height: 8px; border-radius: 50%; }
+    .status-pill .dot-streaming { background: var(--c-streaming); box-shadow: 0 0 7px var(--c-streaming); }
+    .status-pill .dot-awaiting  { background: var(--c-awaiting);  box-shadow: 0 0 7px var(--c-awaiting); }
+    .status-pill .dot-success   { background: #166534; }
+    .status-pill .dot-error     { background: var(--c-error); }
+    .status-pill .dot-killed    { background: var(--c-killed); }
+    .status-pill #status-text {
+      font-weight: 500;
+      /* color is set inline by JS to match the dot */
+    }
+
+    /* Status tooltip — origin-aware, custom ease-out. */
+    .status-tip {
       position: absolute;
-      top: calc(100% + 8px);
-      left: 0;
-      background: #1a1a1a;
-      border: 1px solid #333;
-      color: #ddd;
+      top: calc(100% + 6px); left: 0;
+      transform-origin: top left;
+      transform: scale(0.97);
+      background: #161616;
+      border: 1px solid var(--border-hi);
+      color: var(--text);
       font-size: 11px;
       padding: 6px 10px;
-      border-radius: 6px;
+      border-radius: 5px;
       white-space: nowrap;
       pointer-events: none;
       opacity: 0;
-      transition: opacity 0.15s;
+      transition: opacity 125ms var(--ease-out), transform 125ms var(--ease-out);
       z-index: 10;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.5);
     }
-    .badge-tip-desc { color: #888; font-size: 10px; margin-top: 2px; }
-    #badge-status-wrap:hover .badge-tip { opacity: 1; }
-
-    #back { color: #666; text-decoration: none; font-size: 12px; margin-right: 4px; }
-    #back:hover { color: #5ac8e2; }
-
-    .spacer { flex: 1; }
+    .status-tip-desc { color: var(--dim); font-size: 10px; margin-top: 1px; }
+    @media (hover: hover) and (pointer: fine) {
+      .status-pill:hover .status-tip { opacity: 1; transform: scale(1); }
+    }
 
     .copy-btn {
-      background: #222;
-      border: 1px solid #333;
-      color: #888;
-      font-size: 11px;
-      padding: 2px 8px;
+      background: var(--panel);
+      border: 1px solid var(--border-hi);
+      color: var(--dim);
+      font-size: 10px;
+      padding: 4px 10px;
       border-radius: 4px;
       cursor: pointer;
-      font-family: 'SF Mono', monospace;
+      font-family: inherit;
+      letter-spacing: 0.03em;
+      text-transform: lowercase;
+      transition: transform 100ms var(--ease-out),
+                  background-color 160ms var(--ease-out),
+                  border-color 160ms var(--ease-out),
+                  color 160ms var(--ease-out);
     }
-    .copy-btn:hover { background: #333; color: #ccc; }
+    .copy-btn:active { transform: scale(0.97); }
+    @media (hover: hover) and (pointer: fine) {
+      .copy-btn:hover { background: #141414; color: var(--text); border-color: #444; }
+    }
 
     .meta-tag {
-      font-family: 'SF Mono', monospace;
+      font-family: inherit;
       font-size: 10px;
-      color: #555;
-      background: #1a1a1a;
-      padding: 1px 6px;
+      color: var(--dim);
+      background: var(--panel);
+      padding: 2px 7px;
+      border: 1px solid var(--border);
       border-radius: 3px;
     }
 
-    #terminal { flex: 1; width: 100%; }
+    /* Stream tabs — a dedicated row that only appears for multi-stream runs.
+       Each stream is a clearly-styled button so it reads as "click to switch." */
+    #stream-tabs {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 16px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      font-size: 11px;
+      flex-shrink: 0;
+      overflow-x: auto;
+    }
+    .tabs-label {
+      color: var(--dim);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      flex-shrink: 0;
+    }
+    .tabs-label b { color: var(--text); font-weight: 500; text-transform: none; letter-spacing: 0; }
+    .tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+    .tab {
+      padding: 4px 12px;
+      border: 1px solid var(--border-hi);
+      border-radius: 4px;
+      color: var(--dim);
+      text-decoration: none;
+      font-size: 12px;
+      transition: color 160ms var(--ease-out),
+                  background-color 160ms var(--ease-out),
+                  border-color 160ms var(--ease-out),
+                  transform 100ms var(--ease-out);
+    }
+    .tab:active { transform: scale(0.97); }
+    @media (hover: hover) and (pointer: fine) {
+      .tab:hover { color: var(--text); background: var(--panel-2); border-color: #5a5a5a; }
+    }
+    .tab.current {
+      color: var(--aqua);
+      border-color: var(--aqua);
+      background: #0e2b33;
+      font-weight: 500;
+    }
+    .tab .tab-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { transition: none !important; }
+      .copy-btn:active { transform: none; }
+    }
+
+    /* Page body sits the terminal frame + observe rail with breathing room. */
+    #main {
+      flex: 1; display: flex; min-height: 0;
+      padding: 12px;
+      gap: 12px;
+    }
+
+    /* Mac-terminal-style frame around the xterm: traffic lights + thin
+       title bar + the terminal proper, rounded and bordered. */
+    #terminal-frame {
+      flex: 1; min-width: 0;
+      display: flex; flex-direction: column;
+      background: var(--term-bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .term-titlebar {
+      display: flex; align-items: center; gap: 14px;
+      padding: 9px 14px;
+      background: #0f0f0f;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .traffic-lights { display: flex; gap: 7px; align-items: center; flex-shrink: 0; }
+    .tl {
+      width: 12px; height: 12px; border-radius: 50%;
+      box-shadow: inset 0 0 0 0.5px rgba(0,0,0,0.25);
+    }
+    .tl.r { background: #ff5f57; }
+    .tl.y { background: #febc2e; }
+    .tl.g { background: #28c840; }
+    #terminal {
+      flex: 1; min-width: 0; min-height: 0;
+      padding: 10px 12px 8px;
+    }
+
+    /* Observe rail — matches the terminal frame's rounded card. */
+    #observe-panel {
+      width: 340px;
+      flex-shrink: 0;
+      display: none;
+      flex-direction: column;
+      gap: 10px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+      overflow-y: auto;
+      font-family: inherit;             /* monospace, matches the TUI */
+      color: var(--text);
+    }
+    #observe-panel.show { display: flex; }
+    .obs-head {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+      text-transform: uppercase; color: #5ac8e2;
+    }
+    .obs-pill {
+      display: inline-flex; align-items: center; gap: 5px;
+      margin-left: auto; padding: 1px 8px; border-radius: 10px;
+      font-size: 10px; font-weight: 600; letter-spacing: 0.03em;
+      text-transform: none; background: #1a1a1a; color: #ccc;
+    }
+    .obs-dot { width: 7px; height: 7px; border-radius: 50%; background: #555; }
+    .obs-summary { font-size: 13px; color: #e8e8e8; line-height: 1.45; }
+    .obs-runtype { font-size: 10px; color: #888; text-transform: uppercase; letter-spacing: 0.05em; }
+    .obs-title { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: #666; margin-top: 6px; }
+    .obs-metric {
+      display: flex; justify-content: space-between;
+      font-family: 'SF Mono', monospace; font-size: 12px; color: #bbb; padding: 1px 0;
+    }
+    .obs-metric .m-val { color: #e0e0e0; }
+    .obs-detector {
+      font-size: 12px; line-height: 1.35; padding: 5px 8px; border-radius: 4px;
+      background: #1a1212; border-left: 2px solid #b91c1c; margin-bottom: 4px;
+    }
+    .obs-detector .d-name { color: #f87171; font-weight: 600; text-transform: capitalize; }
+    .obs-event { border-left: 2px solid #2a2a2a; padding: 2px 0 4px 8px; margin-bottom: 5px; }
+    .obs-event-time { color: #5a5a5a; font-size: 10px; font-family: 'SF Mono', monospace; }
+    .obs-event-summary { color: #b8b8b8; font-size: 11px; line-height: 1.35; }
+
+    /* Stub-mode banner — shown when no LLM is configured, so the user knows
+       why summaries are minimal and how to enable real ones. */
+    .stub-banner {
+      font-size: 11px;
+      color: #d4c69f;
+      background: #1a1610;
+      border: 1px solid #3a2f1a;
+      border-radius: 4px;
+      padding: 8px 10px;
+      line-height: 1.4;
+    }
+    .stub-banner b { color: #eab308; font-weight: 600; }
+    .stub-banner code {
+      background: #0e0c08;
+      padding: 1px 5px;
+      border-radius: 3px;
+      color: #f0d896;
+      font-size: 10px;
+    }
+
+    /* Lineage — sibling runs of the same command + dir (zero-LLM metadata). */
+    .obs-lin {
+      display: flex; align-items: center; gap: 6px;
+      padding: 3px 5px; border-radius: 4px; text-decoration: none;
+      color: #bbb; font-size: 11px;
+    }
+    .obs-lin:hover { background: #1a1a1a; }
+    .obs-lin.cur { background: #15232a; }
+    .lin-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+    .lin-name { color: #888; font-family: 'SF Mono', monospace; }
+    .obs-lin.cur .lin-name { color: #5ac8e2; }
+    .lin-params { color: #ddd; font-family: 'SF Mono', monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   </style>
 </head>
 <body>
   <div id="status-bar">
-    <a id="back" href="/">← runs</a>
-    <span class="badge badge-gray" id="badge-name-wrap">
-      <span class="badge-label">run</span>
-      <span class="badge-value" id="badge-name">-</span>
-    </span>
-    <span class="badge badge-gray" id="badge-status-wrap">
-      <span class="badge-label">status</span>
-      <span class="badge-value" id="badge-status">loading</span>
-      <span class="badge-tip" id="badge-status-tip">
-        <div class="badge-tip-desc">loading...</div>
-      </span>
-    </span>
-    <span class="badge badge-gray">
-      <span class="badge-label">time</span>
-      <span class="badge-value" id="badge-duration">0s</span>
-    </span>
-    <span class="badge badge-gray">
-      <span class="badge-label">lines</span>
-      <span class="badge-value" id="badge-lines">0</span>
-    </span>
-    <span class="badge badge-gray">
-      <span class="badge-label">data</span>
-      <span class="badge-value" id="badge-bytes">0 B</span>
-    </span>
-    <span id="meta-tags"></span>
-    <span class="spacer"></span>
+    <a id="back" href="/admin">← runs</a>
+    <span class="crumbs" id="crumbs"></span>
+    <span class="head-rule"></span>
     <button class="copy-btn" id="copy-cmd" style="display:none" title="Copy command">copy cmd</button>
     <button class="copy-btn" id="copy-dir" style="display:none" title="Copy directory">copy dir</button>
   </div>
-  <div id="terminal"></div>
+  <!-- Stream tabs row — only shown for multi-stream runs. The breadcrumb
+       above shows the hierarchy; this row is just the switcher. -->
+  <div id="stream-tabs" style="display:none">
+    <span class="tabs-label">streams:</span>
+    <span class="tabs" id="tabs"></span>
+  </div>
+  <div id="main">
+    <div id="terminal-frame">
+      <div class="term-titlebar">
+        <div class="traffic-lights">
+          <span class="tl r" aria-hidden="true"></span>
+          <span class="tl y" aria-hidden="true"></span>
+          <span class="tl g" aria-hidden="true"></span>
+        </div>
+        <span class="term-user" id="term-user"></span>
+        <div class="term-cmd"><span class="dollar">$</span><span id="term-cmd-text">…</span></div>
+        <div class="term-meta">
+          <span class="status-pill" id="status-pill">
+            <span class="dot dot-killed" id="status-dot"></span>
+            <span id="status-text">loading</span>
+            <span class="status-tip" id="status-tip"></span>
+          </span>
+          <span class="sep">·</span><span id="meta-time">0s</span>
+          <span class="sep">·</span><span id="meta-bytes">0B</span>
+        </div>
+      </div>
+      <div id="terminal"></div>
+    </div>
+    <aside id="observe-panel">
+      <div class="obs-head">
+        <span>⊙ observe</span>
+        <span class="obs-pill" id="obs-pill" style="display:none"><span class="obs-dot" id="obs-dot"></span><span id="obs-status">—</span></span>
+      </div>
+      <div class="obs-summary" id="obs-summary"></div>
+      <div class="obs-runtype" id="obs-runtype"></div>
+      <div class="stub-banner" id="stub-banner" style="display:none">
+        <b>stub mode</b> — no LLM configured, so spout is reporting bytes only.
+        Set <code>ANTHROPIC_API_KEY</code> in <code>~/.config/spout/.env</code>
+        to get real summaries, loop/drift/amnesia detectors, and a decision trail.
+      </div>
+      <div id="obs-metrics"></div>
+      <div id="obs-detectors"></div>
+      <div id="obs-decisions"></div>
+      <div class="obs-title" id="obs-timeline-title" style="display:none">timeline</div>
+      <div id="obs-timeline"></div>
+      <div id="obs-lineage"></div>
+    </aside>
+  </div>
 
   <script>
     const fullName = location.pathname.split('/').pop();
 
-    function displayName(name) {
-      const i = name.lastIndexOf('-');
-      if (i > 0) return name.substring(0, i);
-      return name;
-    }
+    // Browser tab title. The page title (the user's command) is populated
+    // from meta in init().
+    document.title = `spout · ${fullName}`;
 
-    document.getElementById('badge-name').textContent = displayName(fullName);
-    document.title = `spout · ${displayName(fullName)}`;
-
+    // Fixed dimensions matching the tmux pane (config.DefaultTerminal{Cols,Rows}).
+    // This is the fix for "claude renders all weird": programs render their TUI
+    // for the tmux pane width; if xterm displays at a different width the ANSI
+    // redraws land in the wrong cells. Same width on both sides = correct render.
+    // Container overflow handles narrow viewports — content scrolls horizontally
+    // instead of wrapping.
     const term = new Terminal({
       cursorBlink: false,
       cursorStyle: 'bar',
       disableStdin: true,
       convertEol: true,
       scrollback: 50000,
-      fontSize: 13,
+      cols: 120,
+      rows: 30,
+      fontSize: 14,
       fontFamily: "'SF Mono', 'Cascadia Code', 'Fira Code', 'Menlo', monospace",
-      theme: { background: '#0a0a0a', foreground: '#e0e0e0' },
+      theme: { background: '#050505', foreground: '#ededed' },
     });
 
-    const fit = new FitAddon.FitAddon();
     const webLinks = new WebLinksAddon.WebLinksAddon();
-    term.loadAddon(fit);
     term.loadAddon(webLinks);
     term.open(document.getElementById('terminal'));
-    fit.fit();
-    window.addEventListener('resize', () => fit.fit());
 
-    const statusEl = document.getElementById('badge-status');
-    const statusWrap = document.getElementById('badge-status-wrap');
-    const bytesEl = document.getElementById('badge-bytes');
+    const statusEl   = document.getElementById('status-text');
+    const statusDot  = document.getElementById('status-dot');
+    const statusTip  = document.getElementById('status-tip');
+    const bytesEl    = document.getElementById('meta-bytes');
+    const durationEl = document.getElementById('meta-time');
+    const userEl     = document.getElementById('term-user');
+    const cmdTextEl  = document.getElementById('term-cmd-text');
     const copyCmdBtn = document.getElementById('copy-cmd');
     const copyDirBtn = document.getElementById('copy-dir');
-    const metaTags = document.getElementById('meta-tags');
-    const durationEl = document.getElementById('badge-duration');
-    const linesEl = document.getElementById('badge-lines');
+    // linesEl removed (line count was redundant alongside bytes).
+    const linesEl    = { set textContent(_) {} }; // no-op compat with existing onmessage
     let totalBytes = 0;
     let totalLines = 0;
     let startTime = Date.now();
@@ -175,10 +450,11 @@
     let windowStart = Date.now();
     let wasIdle = false;
 
+    // Data size — unit attached to the number, no space (17B, 2.9KB).
     function humanBytes(b) {
-      if (b >= 1024 * 1024) return (b / (1024 * 1024)).toFixed(1) + ' MB';
-      if (b >= 1024) return (b / 1024).toFixed(1) + ' KB';
-      return b + ' B';
+      if (b >= 1024 * 1024) return (b / (1024 * 1024)).toFixed(1) + 'MB';
+      if (b >= 1024) return (b / 1024).toFixed(1) + 'KB';
+      return b + 'B';
     }
 
     function humanDuration(ms) {
@@ -196,26 +472,24 @@
     }
 
     // Single source of truth for status label + color + tooltip.
-    // Must match cmd/spout/cmd/color.go statusText() and index.html.
+    // Class suffix names match .dot-* in CSS (and the dashboard).
     function statusInfo(status) {
       switch (status) {
-        case 'streaming': return { label: 'streaming',         color: 'green',     desc: 'receiving data right now' };
-        case 'awaiting':  return { label: 'awaiting input',    color: 'yellow',    desc: 'shell is idle at a prompt' };
-        case 'success':   return { label: 'completed',         color: 'darkgreen', desc: 'command exited cleanly (0)' };
-        case 'error':     return { label: 'exited with error', color: 'red',       desc: 'command exited non-zero' };
-        case 'killed':    return { label: 'stopped by you',    color: 'gray',      desc: 'session ended before the command finished' };
-        default:          return { label: status || 'unknown', color: 'gray',      desc: '' };
+        case 'streaming': return { label: 'streaming', color: 'streaming', hex: '#22c55e', desc: 'receiving data right now' };
+        case 'awaiting':  return { label: 'idle',      color: 'awaiting',  hex: '#eab308', desc: 'shell is idle at a prompt' };
+        case 'success':   return { label: 'done',      color: 'success',   hex: '#4ade80', desc: 'exited cleanly (0)' };
+        case 'error':     return { label: 'error',     color: 'error',     hex: '#f87171', desc: 'exited non-zero' };
+        case 'killed':    return { label: 'stopped',   color: 'killed',    hex: '#9a9a9a', desc: 'ended before the command finished' };
+        default:          return { label: status || '?', color: 'killed',  hex: '#9a9a9a', desc: '' };
       }
     }
 
-    const statusTip = document.getElementById('badge-status-tip');
     function setStatus(status) {
       const info = statusInfo(status);
       statusEl.textContent = info.label;
-      statusWrap.className = 'badge badge-' + info.color;
-      statusTip.innerHTML = info.desc
-        ? `<div class="badge-tip-desc">${info.desc}</div>`
-        : `<div class="badge-tip-desc">${info.label}</div>`;
+      statusEl.style.color = info.hex;
+      statusDot.className = 'dot dot-' + info.color;
+      statusTip.innerHTML = `<div class="status-tip-desc">${info.desc || info.label}</div>`;
     }
 
     async function fetchFinalStatus() {
@@ -235,7 +509,30 @@
       if (durationTimer) clearInterval(durationTimer);
       const finalStatus = await fetchFinalStatus();
       setStatus(finalStatus);
-      term.write('\r\n\x1b[90m[stream ended]\x1b[0m\r\n');
+      // If the server still reports the run as active, our WebSocket
+      // dropped (network blip, laptop sleep, proxy idle-timeout) — the
+      // run itself didn't end. Say so, instead of a misleading
+      // "[stream ended]".
+      if (finalStatus === 'streaming' || finalStatus === 'awaiting') {
+        showReconnectBanner();
+        term.write('\r\n\x1b[33m[connection lost — run is still active]\x1b[0m\r\n');
+      } else {
+        term.write('\r\n\x1b[90m[stream ended]\x1b[0m\r\n');
+      }
+    }
+
+    // showReconnectBanner appears when the viewer's WebSocket drops but
+    // the run is still live. Reconnecting is a plain page reload (replay
+    // restarts from the top — cursor-based resume is a later milestone).
+    function showReconnectBanner() {
+      if (document.getElementById('reconnect-banner')) return;
+      const banner = document.createElement('div');
+      banner.id = 'reconnect-banner';
+      banner.style.cssText = 'background:#854d0e;color:#fde68a;padding:10px 14px;margin:10px 0;border-radius:6px;font-family:-apple-system,sans-serif;font-size:13px';
+      banner.innerHTML = 'Connection lost — the run is still active. ' +
+        '<a href="' + location.pathname + '" style="color:#fde68a;text-decoration:underline">Reconnect</a>';
+      const t = document.querySelector('#terminal') || document.body;
+      t.parentNode.insertBefore(banner, t);
     }
 
     // Awaiting = no burst of real output for 1s. Keystroke echoes (<50 bytes) don't count.
@@ -276,23 +573,28 @@
         }
         makeCopy(copyDirBtn, meta.dir || '~');
 
-        // Meta tags (host, branch).
-        let tags = '';
-        if (meta.host) tags += `<span class="meta-tag">${meta.host}</span> `;
-        if (meta.git_branch) tags += `<span class="meta-tag">${meta.git_branch}</span> `;
-        metaTags.innerHTML = tags;
+        // Breadcrumb: job / run / current-leaf. Mirrors the dashboard's
+        // multi-stream group display so the hierarchy reads the same way.
+        renderCrumbs(meta);
 
-        // Shell prompt header.
-        const user = meta.user || 'user';
-        const host = meta.host || 'local';
-        const folder = meta.dir ? meta.dir.split('/').pop() || '~' : '~';
+        // The terminal title shows the user's command (or the run name for
+        // pipe mode, since there's no command to display).
+        cmdTextEl.textContent = meta.command
+          ? meta.command
+          : (meta.mode === 'pipe' ? '… | spout · ' + fullName : fullName);
 
-        if (meta.mode === 'run' && meta.command) {
-          term.write(`\x1b[32m${user}@${host}\x1b[0m:\x1b[34m${folder}\x1b[0m$ ${meta.command}\r\n`);
+        // user@host as a small tag in the title bar — universal metadata
+        // worth surfacing alongside the command, no fancy prompt-painting.
+        if (meta.user || meta.host) {
+          const u = meta.user || '?', h = meta.host || '?';
+          userEl.innerHTML = `<b>${u}</b>@${h}`;
         } else {
-          term.write(`\x1b[32m${user}@${host}\x1b[0m:\x1b[34m${folder}\x1b[0m$ \x1b[2m… | spout\x1b[0m\r\n`);
+          userEl.style.display = 'none';
         }
-        term.write(`\x1b[90m${'─'.repeat(60)}\x1b[0m\r\n`);
+
+        // Stream tabs: when this run is part of a multi-stream group,
+        // surface siblings as a tab row below the chrome.
+        loadStreamNav(meta);
 
         if (meta.started_ms) startTime = meta.started_ms;
 
@@ -311,7 +613,16 @@
       const ws = new WebSocket(`${proto}//${location.host}/ws/${fullName}`);
       ws.binaryType = 'arraybuffer';
 
+      // Track whether the WS handshake actually completed. If onclose fires
+      // without onopen ever firing, the connection failed before upgrade —
+      // typically a proxy blocking the Upgrade header (Seashells issue #17).
+      let wsConnected = false;
+      // Replay-cap banner element (lazily created when server sends a
+      // {"truncated":true,...} hint).
+      let truncatedBanner = null;
+
       ws.onopen = () => {
+        wsConnected = true;
         if (!meta || meta.active) {
           sessionActive = true;
           setStatus('streaming');
@@ -319,11 +630,23 @@
         }
       };
 
+      ws.onerror = () => {
+        // onerror fires before onclose on connection failures. Mark + let
+        // onclose handle the user-visible banner (centralized).
+        wsConnected = wsConnected; // no-op; flag stays false if upgrade failed
+      };
+
       ws.onmessage = (e) => {
         if (typeof e.data === 'string') {
           try {
             const msg = JSON.parse(e.data);
             if (msg.status === 'ended') { markEnded(); return; }
+            if (msg.truncated) {
+              // Replay capped — server is sending only the tail. Show a
+              // banner so the user knows + can grab the full file.
+              showTruncatedBanner(msg.shown, msg.total);
+              return;
+            }
           } catch {}
         }
 
@@ -362,16 +685,229 @@
         term.write(text);
       };
 
-      ws.onclose = () => {
+      ws.onclose = (event) => {
+        // WS handshake never succeeded → Upgrade likely blocked by a proxy.
+        // Show a clear banner instead of leaving a blinking-cursor terminal.
+        if (!wsConnected) {
+          showWsFailedBanner();
+          return;
+        }
         if (statusEl.textContent === STREAMING_LABEL || statusEl.textContent === AWAITING_LABEL) {
           markEnded();
         } else if (statusEl.textContent === 'loading') {
           setStatus('ended');
         }
       };
+
+      function showWsFailedBanner() {
+        const banner = document.createElement('div');
+        banner.style.cssText = 'background:#7f1d1d;color:#fca5a5;padding:12px 16px;border-radius:6px;margin:12px 0;font-family:-apple-system,sans-serif;line-height:1.5';
+        banner.innerHTML =
+          '<strong>Connection failed.</strong> Your network may be blocking WebSockets ' +
+          '(corporate proxy, locked-down VPN, etc.).<br>' +
+          'Try a different network, or use the spout CLI: <code style="background:#000;padding:2px 6px;border-radius:3px">spout logs ' +
+          fullName + '</code>';
+        const term = document.querySelector('#terminal') || document.body;
+        term.parentNode.insertBefore(banner, term);
+      }
+
+      function showTruncatedBanner(shown, total) {
+        if (truncatedBanner) return;
+        const fmt = (n) => (n / (1024 * 1024)).toFixed(1) + 'MB';
+        truncatedBanner = document.createElement('div');
+        truncatedBanner.style.cssText = 'background:#854d0e;color:#fde68a;padding:8px 12px;border-radius:4px;margin:8px 0;font-family:-apple-system,sans-serif;font-size:13px';
+        truncatedBanner.innerHTML =
+          'Showing last <strong>' + fmt(shown) + '</strong> of <strong>' + fmt(total) +
+          '</strong> total. <a href="/api/run/' + fullName + '/raw?download=1" ' +
+          'style="color:#fde68a;text-decoration:underline">Download full log →</a>';
+        const term = document.querySelector('#terminal') || document.body;
+        term.parentNode.insertBefore(truncatedBanner, term);
+      }
     }
 
     init();
+
+    // ---- observe panel ----
+    // Polls the run's events (newline-delimited JSON from the observer). The
+    // panel stays hidden until at least one event exists, so runs without
+    // observability look exactly as before.
+    const obsPanel = document.getElementById('observe-panel');
+    const OBS_COLOR = { on_track: '#22c55e', warning: '#eab308', failed: '#b91c1c', done: '#166534' };
+    const OBS_LABEL = { on_track: 'on track', warning: 'warning', failed: 'failed', done: 'done' };
+    const RUN_HEX = { streaming: '#22c55e', awaiting: '#eab308', success: '#166534', error: '#b91c1c', killed: '#555' };
+
+    function fmtClock(ts) {
+      const d = new Date(ts);
+      return isNaN(d) ? '' : d.toLocaleTimeString();
+    }
+
+    // Reveal the rail once. xterm has a fixed width so no resize is needed —
+    // the terminal-frame just shares horizontal space with the panel.
+    function showPanel() {
+      if (!obsPanel.classList.contains('show')) {
+        obsPanel.classList.add('show');
+      }
+    }
+
+    function renderObserve(events) {
+      showPanel();
+      document.getElementById('obs-pill').style.display = '';
+      const latest = events[events.length - 1].obs || {};
+      const status = latest.status || 'on_track';
+
+      // Stub banner — show only when the engine is reporting it's in stub mode.
+      document.getElementById('stub-banner').style.display = latest.stub ? '' : 'none';
+
+      document.getElementById('obs-dot').style.background = OBS_COLOR[status] || '#555';
+      document.getElementById('obs-status').textContent = OBS_LABEL[status] || status;
+      document.getElementById('obs-summary').textContent = latest.summary || '';
+      document.getElementById('obs-runtype').textContent = latest.run_type ? 'run type · ' + latest.run_type : '';
+
+      // Metrics.
+      const mEl = document.getElementById('obs-metrics');
+      const metrics = latest.metrics || [];
+      if (metrics.length) {
+        mEl.innerHTML = '<div class="obs-title">metrics</div>' + metrics.map(m => {
+          const trend = m.trend === 'up' ? ' ↑' : m.trend === 'down' ? ' ↓' : '';
+          const unit = m.unit ? ' ' + m.unit : '';
+          return `<div class="obs-metric"><span>${m.name}</span><span class="m-val">${m.value}${unit}${trend}</span></div>`;
+        }).join('');
+      } else { mEl.innerHTML = ''; }
+
+      // Detectors — show only the ones with evidence (triggered).
+      const dEl = document.getElementById('obs-detectors');
+      const dets = Object.entries(latest.detectors || {}).filter(([, v]) => v && v.trim());
+      if (dets.length) {
+        dEl.innerHTML = '<div class="obs-title">detectors</div>' + dets.map(([k, v]) =>
+          `<div class="obs-detector"><span class="d-name">${k}</span> — ${v}</div>`).join('');
+      } else { dEl.innerHTML = ''; }
+
+      // Decision trail — accumulated across all checks (agent runs).
+      const decEl = document.getElementById('obs-decisions');
+      const decisions = [];
+      for (const ev of events) for (const d of (ev.obs && ev.obs.decisions) || []) {
+        if (d && d.action) decisions.push(d);
+      }
+      if (decisions.length) {
+        decEl.innerHTML = '<div class="obs-title">decisions</div>' + decisions.slice(-10).map(d =>
+          `<div class="obs-event" style="border-left-color:#5ac8e2">
+            <div class="obs-event-summary">${d.action}</div>
+            ${d.reason ? `<div class="obs-event-time">${d.reason}</div>` : ''}
+          </div>`).join('');
+      } else { decEl.innerHTML = ''; }
+
+      // Timeline — newest first, capped.
+      document.getElementById('obs-timeline-title').style.display = events.length ? '' : 'none';
+      const tEl = document.getElementById('obs-timeline');
+      tEl.innerHTML = events.slice(-12).reverse().map(ev => {
+        const o = ev.obs || {};
+        const c = OBS_COLOR[o.status] || '#555';
+        return `<div class="obs-event" style="border-left-color:${c}">
+          <div class="obs-event-time">${fmtClock(ev.ts)} · ${ev.trigger || ''}</div>
+          <div class="obs-event-summary">${o.summary || ''}</div>
+        </div>`;
+      }).join('');
+    }
+
+    async function pollObserve() {
+      try {
+        const res = await fetch(`/api/run/${fullName}/events`);
+        if (!res.ok) return;
+        const text = await res.text();
+        const events = text.split('\n').filter(Boolean).map(l => {
+          try { return JSON.parse(l); } catch { return null; }
+        }).filter(Boolean);
+        if (events.length) renderObserve(events);
+      } catch {}
+    }
+
+    pollObserve();
+    setInterval(pollObserve, 3000);
+
+    // ---- lineage (zero-LLM): sibling runs of the same command + dir ----
+    function lineageParts(cmd) {
+      const toks = (cmd || '').trim().split(/\s+/).filter(Boolean);
+      let i = 0, kept = 0;
+      while (i < toks.length && kept < 2 && !toks[i].startsWith('-')) { i++; kept++; }
+      return { base: toks.slice(0, i).join(' '), params: toks.slice(i).join(' ') };
+    }
+    function lineageKey(cmd, dir) { return (dir || '') + '|' + lineageParts(cmd).base; }
+
+    async function pollLineage() {
+      try {
+        const res = await fetch('/api/runs');
+        if (!res.ok) return;
+        const runs = await res.json();
+        const me = runs.find(r => r.name === fullName);
+        if (!me || !me.command) return;
+        // Yaml-spawned streams (have both `run` and `label`) live in a job
+        // group — the stream tabs above already correlate them. Lineage's
+        // command-match would just surface every prior experiment's same
+        // command (e.g., every "htop -d 5"), which isn't useful here.
+        if (me.run && me.label) return;
+        const key = lineageKey(me.command, me.dir);
+        const sibs = runs.filter(r => r.command && lineageKey(r.command, r.dir) === key);
+        if (sibs.length < 2) return; // a lone run has no lineage to show
+        showPanel();
+        sibs.sort((a, b) => (a.started_ms || 0) - (b.started_ms || 0));
+        document.getElementById('obs-lineage').innerHTML =
+          `<div class="obs-title">lineage · ${sibs.length} runs</div>` + sibs.map(r => {
+            const cur = r.name === fullName;
+            const c = RUN_HEX[r.status] || '#555';
+            const params = lineageParts(r.command).params;
+            return `<a class="obs-lin ${cur ? 'cur' : ''}" href="/r/${r.name}">
+              <span class="lin-dot" style="background:${c}"></span>
+              <span class="lin-name">${r.name}</span>
+              <span class="lin-params">${params || '·'}</span>
+            </a>`;
+          }).join('');
+      } catch {}
+    }
+
+    pollLineage();
+    setInterval(pollLineage, 5000);
+
+    // Breadcrumb renderer — job / run / leaf. The leaf is the stream label
+    // for multi-stream runs, or the full run name otherwise.
+    function renderCrumbs(meta) {
+      const escc = s => String(s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+      const parts = [];
+      if (meta.job) parts.push(`<span class="crumb-job">${escc(meta.job)}</span>`);
+      if (meta.run) parts.push(`<span class="crumb-run">${escc(meta.run)}</span>`);
+      const leaf = meta.label || fullName;
+      parts.push(`<span class="crumb-leaf">${escc(leaf)}</span>`);
+      document.getElementById('crumbs').innerHTML =
+        parts.join('<span class="crumb-sep">/</span>');
+    }
+
+    // ---- stream tabs (multi-stream runs) ----
+    // Color map for the small dot on each tab so you can see at a glance
+    // which stream is live, which errored, etc.
+    const STAT_HEX = {
+      streaming: '#22c55e', awaiting: '#eab308',
+      success: '#166534', error: '#b91c1c', killed: '#6a6a6a',
+    };
+    async function loadStreamNav(meta) {
+      if (!meta || !meta.run) return;
+      let runs;
+      try {
+        const res = await fetch('/api/runs');
+        if (!res.ok) return;
+        runs = await res.json();
+      } catch { return; }
+      const sibs = runs.filter(r => r.run === meta.run && r.job === meta.job);
+      if (sibs.length <= 1) return;
+      sibs.sort((a, b) => (a.label || '').localeCompare(b.label || ''));
+      const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+      document.getElementById('tabs').innerHTML = sibs.map(s => {
+        const cur = s.name === fullName ? ' current' : '';
+        const dot = STAT_HEX[s.status] || STAT_HEX.killed;
+        return `<a class="tab${cur}" href="/r/${encodeURIComponent(s.name)}">
+                  <span class="tab-dot" style="background:${dot}"></span>${esc(s.label || s.name)}
+                </a>`;
+      }).join('');
+      document.getElementById('stream-tabs').style.display = '';
+    }
   </script>
 </body>
 </html>

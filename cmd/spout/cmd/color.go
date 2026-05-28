@@ -83,13 +83,14 @@ func PrintError(err error) {
 	fmt.Fprintf(stderr, "%s%s\n", cAqua("spout: "), body)
 }
 
-// label is the standard "label  value" line used everywhere in the CLI.
-// All labels are aqua + bold, padded to a fixed width for alignment.
-// 9 chars accommodates the longest label we print ("clipboard" in doctor).
+// label is the single "label  value" line used everywhere in the CLI.
+// All labels are bold; value renders as the caller passed it. Padded to
+// a fixed width so adjacent labels in a section line up. 9 chars covers
+// the longest label across `spout config` / `spout server` / `spout
+// doctor`'s flat rows ("clipboard"). For sections that need wider
+// labels, use printRows (which auto-aligns within its own slice).
 const labelWidth = 9
 
-// label prints "name  value". Name is plain bold (not aqua), value is plain text.
-// Only sections use aqua+bold.
 func label(name, value string) {
 	pad := labelWidth - len(name)
 	if pad < 0 {
@@ -97,6 +98,47 @@ func label(name, value string) {
 	}
 	fmt.Fprintf(stderr, "  %s%s  %s\n", cBold(name), strings.Repeat(" ", pad), value)
 }
+
+// row is one entry in a section that printRows aligns and renders.
+//
+// `mark` is the leading status glyph (✓ / ! / ✗) for `spout doctor`;
+// leave empty when the section is purely informational. `name` is the
+// row label (already plain — printRows applies bold + padding); `value`
+// is the right-hand body, which the caller may colorize as it likes.
+type row struct {
+	mark  string
+	name  string
+	value string
+}
+
+// printRows renders a section of label/value rows with one consistent
+// width across the slice. The width is the longest label in the slice,
+// so each section can carry labels of any size without disturbing
+// neighbouring sections (`spout config` profiles vs `spout doctor`
+// streams, etc.).
+func printRows(rows []row) {
+	width := 0
+	for _, r := range rows {
+		if n := len(r.name); n > width {
+			width = n
+		}
+	}
+	for _, r := range rows {
+		pad := strings.Repeat(" ", width-len(r.name))
+		if r.mark != "" {
+			fmt.Fprintf(stderr, "  %s %s%s  %s\n", r.mark, cBold(r.name), pad, r.value)
+		} else {
+			fmt.Fprintf(stderr, "  %s%s  %s\n", cBold(r.name), pad, r.value)
+		}
+	}
+}
+
+// markOk / markWarn / markFail are the leading glyphs printRows accepts
+// in row.mark. Centralised so doctor stays consistent with any future
+// command that wants the same severity language.
+func markOk() string   { return cGreen("✓") }
+func markWarn() string { return cYellow("!") }
+func markFail() string { return cRed("✗") }
 
 // statusText returns a colored description of a run's status.
 // Colors must stay in sync with web/static/*.html statusInfo().

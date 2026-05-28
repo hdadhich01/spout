@@ -5,156 +5,252 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
+	"github.com/hdadhich01/spout/internal/store"
 	"github.com/spf13/cobra"
 )
 
+// Flags shared by the unified rm/delete command. Any combination that
+// selects >0 runs batch-deletes; with no args and no flags, we open the
+// interactive menu.
 var (
-	cleanAll      bool
-	cleanOlder    string
-	cleanEnded    bool
-	cleanErrors   bool
-	cleanKeep     int
-	cleanForce    bool
+	rmAll    bool
+	rmEnded  bool
+	rmErrors bool
+	rmOlder  string
+	rmKeep   int
+	rmForce  bool
 )
 
 var deleteCmd = &cobra.Command{
-	Use:     "delete <name> [name...]",
-	Aliases: []string{"rm"},
-	Short:   "Delete runs by name",
-	Long: `Delete a run by name. Accepts multiple names.
+	Use:     "delete [name...]",
+	Aliases: []string{"rm", "clean"},
+	Short:   "Delete runs (by name, by filter, or interactively)",
+	Long: `Delete runs. Targets come from args, filter flags, or an interactive menu.
 
-  spout delete fox
-  spout delete fox bear cat
-  spout rm fox`,
-	Args: cobra.MinimumNArgs(1),
+  spout rm fox                        # by run name
+  spout rm exp-2                      # whole run + every stream in it
+  spout rm exp-2/training             # one stream
+  spout rm fox bear cat               # multiple
+  spout rm --ended                    # every ended run
+  spout rm --errors                   # only errored runs
+  spout rm --older 7d                 # older than (m/h/d/w)
+  spout rm --keep 10                  # keep newest 10
+  spout rm                            # interactive menu`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		deleted := 0
-		for _, name := range args {
-			addr, found := findRunServer(name)
-			if !found {
-				fail("%s %s on any server", cBold(name), cRed("not found"))
-				continue
-			}
-			if err := deleteRun(addr, name); err != nil {
-				fail("%s: %v", cBold(name), err)
-				continue
-			}
-			ok("%s %s", cGreen("deleted"), cBold(name))
-			deleted++
+		if len(args) > 0 {
+			return deleteByArgs(args)
 		}
-		if len(args) > 1 {
-			ok("%s %d of %d run(s)", cGreen("deleted"), deleted, len(args))
+		// Flag-driven batch.
+		if rmAll || rmEnded || rmErrors || rmOlder != "" || rmKeep > 0 {
+			return deleteByFilter()
 		}
-		return nil
+		// Nothing specified - fall to the interactive picker.
+		return interactiveClean()
 	},
 }
 
-var cleanCmd = &cobra.Command{
-	Use:   "clean",
-	Short: "Bulk cleanup of runs",
-	Long: `Bulk cleanup of runs from the server.
+// deleteByArgs handles the "spout rm name [name...]" path. Each arg is
+// resolved against the local copy independently and may target one
+// stream, one standalone run, or a whole multi-stream run group.
+//
+// For each session resolved:
+//   1. Kills tmux backing if still running (with prompt unless -y).
+//   2. Removes the server-side copy when run meta records a server AND
+//      the env var named in meta.ServerToken resolves to a value.
+//      Tokenless server copies stay untouched.
+//   3. Removes the local copy folder.
+func deleteByArgs(args []string) error {
+	local, _, err := openLocal()
+	if err != nil {
+		return err
+	}
 
-  spout clean                  # interactive: prompts before deleting
-  spout clean --all            # delete everything
-  spout clean --ended          # delete all ended runs (keep active)
-  spout clean --errors         # delete only errored runs
-  spout clean --older 7d       # delete runs older than 7 days (h/d/w)
-  spout clean --keep 10        # keep last 10 runs, delete rest
-  spout clean --ended -y       # skip confirmation`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		addr, _ := resolveServer()
-		if err := checkServer(addr); err != nil {
-			return err
+	deleted := 0
+	total := 0
+	for _, arg := range args {
+		hits, rerr := resolveLocalTargets(local, []string{arg}, !rmForce)
+		if rerr != nil {
+			fail("%v", rerr)
+			continue
 		}
-
-		runs, err := fetchRuns(addr)
-		if err != nil {
-			return fmt.Errorf("server %s: %s", cBold(addr), cRed(err.Error()))
-		}
-
-		// Pick which runs to delete based on flags.
-		var targets []runEntry
-		switch {
-		case cleanAll:
-			targets = runs
-		case cleanErrors:
-			for _, r := range runs {
-				if r.Status == "error" {
-					targets = append(targets, r)
-				}
-			}
-		case cleanEnded:
-			for _, r := range runs {
-				if !isActive(r.Status) {
-					targets = append(targets, r)
-				}
-			}
-		case cleanOlder != "":
-			d, err := parseDuration(cleanOlder)
-			if err != nil {
-				return fmt.Errorf("invalid duration %q (use 7d, 24h, 1w)", cleanOlder)
-			}
-			cutoff := time.Now().Add(-d).UnixMilli()
-			for _, r := range runs {
-				if !isActive(r.Status) && r.StartedMs < cutoff {
-					targets = append(targets, r)
-				}
-			}
-		case cleanKeep > 0:
-			// Keep the most recent N (active + recent), delete the rest.
-			// runs are already sorted newest-first by the server.
-			if len(runs) > cleanKeep {
-				targets = runs[cleanKeep:]
-			}
-		default:
-			// Interactive mode - show what's available, ask user.
-			return interactiveClean(addr, runs)
-		}
-
-		if len(targets) == 0 {
-			info("%s", cDim("nothing to clean"))
-			return nil
-		}
-
-		fmt.Fprintf(stderr, "\n")
-		warn("%s %d run(s):", cYellow("about to delete"), len(targets))
-		for i, r := range targets {
-			if i >= 10 {
-				fmt.Fprintf(stderr, "  %s\n", cDim(fmt.Sprintf("... and %d more", len(targets)-10)))
-				break
-			}
-			fmt.Fprintf(stderr, "  %s %s  %s\n", statusDot(r.Status), cBold(displayName(r.Name)), cDim(humanDuration(r.DurationMs)))
-		}
-		fmt.Fprintf(stderr, "\n")
-
-		if !cleanForce {
-			// --all is destructive: require typing 'delete'.
-			if cleanAll {
-				if !confirmTyped("destructive - confirm deletion of ALL runs", "delete") {
-					info("%s", cDim("cancelled"))
-					return nil
-				}
-			} else if !confirm("proceed?") {
-				info("%s", cDim("cancelled"))
-				return nil
-			}
-		}
-
-		deleted := 0
-		for _, r := range targets {
-			if err := deleteRun(addr, r.Name); err == nil {
+		for _, sess := range hits {
+			total++
+			if deleteOneLocal(local, sess) {
 				deleted++
 			}
 		}
-		ok("%s %d run(s)", cGreen("deleted"), deleted)
-		return nil
-	},
+	}
+	if total > 1 {
+		ok("%s %d of %d", cGreen("deleted"), deleted, total)
+	}
+	return nil
 }
 
-func interactiveClean(addr string, runs []runEntry) error {
+// deleteOneLocal removes a single run end-to-end: tmux backing, optional
+// server-side copy, then the local copy folder. Returns true on a clean
+// removal of the local copy.
+func deleteOneLocal(local *store.FileStore, sess *store.Session) bool {
+	tmuxSession := sess.Name
+	if sess.Run != "" {
+		tmuxSession = sess.Run
+	}
+	tmuxAlive := exec.Command("tmux", "has-session", "-t", tmuxSession).Run() == nil
+
+	if tmuxAlive && !rmForce {
+		warn("%s is %s", cBold(sess.Name), cYellow("still running"))
+		if !confirm("kill it and delete?") {
+			info("%s %s", cDim("skipped"), cBold(sess.Name))
+			return false
+		}
+	}
+	if tmuxAlive {
+		exec.Command("tmux", "kill-session", "-t", tmuxSession).Run()
+	}
+
+	// Server-side delete is auth-gated. Tokenless = local-only with note.
+	if sess.ServerURL != "" {
+		token := os.Getenv(sess.ServerToken)
+		if sess.ServerToken != "" && token != "" {
+			if err := deleteRun(sess.ServerURL, sess.Name, sess.ServerToken); err != nil {
+				warn("server delete %s: %v", cBold(sess.Name), err)
+			} else {
+				info("%s on server %s", cDim("deleted"), cDim(sess.ServerURL))
+			}
+		} else {
+			info("%s — server runs aren't deletable without auth", cDim("local only"))
+		}
+	}
+
+	if err := local.Delete(sess.Name); err != nil {
+		fail("local delete %s: %v", cBold(sess.Name), err)
+		return false
+	}
+	ok("%s %s", cGreen("deleted"), cBold(sess.Name))
+	return true
+}
+
+// deleteByFilter selects runs according to the set flags, shows a preview,
+// prompts (unless -y), and batch-deletes. Filters operate on the server
+// (status / age) and so this path remains server-affiliated; the by-name
+// path (deleteByArgs) is the local-affiliated one.
+func deleteByFilter() error {
+	addr, _ := resolveServer()
+	tokenVar := resolveServerTokenVar()
+	if err := checkServer(addr); err != nil {
+		return err
+	}
+	runs, err := fetchRuns(addr)
+	if err != nil {
+		return fmt.Errorf("server %s: %s", cBold(addr), cRed(err.Error()))
+	}
+
+	var targets []runEntry
+	switch {
+	case rmAll:
+		targets = runs
+	case rmErrors:
+		for _, r := range runs {
+			if r.Status == "error" {
+				targets = append(targets, r)
+			}
+		}
+	case rmEnded:
+		for _, r := range runs {
+			if !isActive(r.Status) {
+				targets = append(targets, r)
+			}
+		}
+	case rmOlder != "":
+		d, err := parseDuration(rmOlder)
+		if err != nil {
+			return fmt.Errorf("invalid duration %q (use 7d, 24h, 1w)", rmOlder)
+		}
+		cutoff := time.Now().Add(-d).UnixMilli()
+		for _, r := range runs {
+			if !isActive(r.Status) && r.StartedMs < cutoff {
+				targets = append(targets, r)
+			}
+		}
+	case rmKeep > 0:
+		if len(runs) > rmKeep {
+			targets = runs[rmKeep:]
+		}
+	}
+
+	if len(targets) == 0 {
+		info("%s", cDim("nothing to delete"))
+		return nil
+	}
+
+	fmt.Fprintln(stderr)
+	warn("%s %d run(s):", cYellow("about to delete"), len(targets))
+	for i, r := range targets {
+		if i >= 10 {
+			fmt.Fprintf(stderr, "  %s\n", cDim(fmt.Sprintf("... and %d more", len(targets)-10)))
+			break
+		}
+		fmt.Fprintf(stderr, "  %s %s  %s\n", statusDot(r.Status), cBold(r.Name), cDim(humanDuration(r.DurationMs)))
+	}
+	fmt.Fprintln(stderr)
+
+	if !rmForce {
+		if rmAll {
+			if !confirmTyped("destructive - confirm deletion of ALL runs", "delete") {
+				info("%s", cDim("cancelled"))
+				return nil
+			}
+		} else if !confirm("proceed?") {
+			info("%s", cDim("cancelled"))
+			return nil
+		}
+	}
+
+	// Kill any tmux sessions still backing selected targets FIRST so we
+	// don't leave panes streaming into deleted server records. Dedup by
+	// tmux session name so a group of 4 streams kills once, not four
+	// times.
+	killedSessions := map[string]struct{}{}
+	for _, r := range targets {
+		session := r.Name
+		if r.Run != "" {
+			session = r.Run
+		}
+		if _, done := killedSessions[session]; done {
+			continue
+		}
+		if exec.Command("tmux", "has-session", "-t", session).Run() == nil {
+			exec.Command("tmux", "kill-session", "-t", session).Run()
+			killedSessions[session] = struct{}{}
+		}
+	}
+
+	deleted := 0
+	for _, r := range targets {
+		if err := deleteRun(addr, r.Name, tokenVar); err == nil {
+			deleted++
+		}
+	}
+	ok("%s %d %s", cGreen("deleted"), deleted, pluralize("run", deleted))
+	return nil
+}
+
+// interactiveClean is the no-args, no-flags fallback. Shows per-bucket
+// counts and a small keyed menu. Picking a bucket is equivalent to
+// running `spout rm --<bucket>`.
+func interactiveClean() error {
+	addr, _ := resolveServer()
+	tokenVar := resolveServerTokenVar()
+	if err := checkServer(addr); err != nil {
+		return err
+	}
+	runs, err := fetchRuns(addr)
+	if err != nil {
+		return fmt.Errorf("server %s: %s", cBold(addr), cRed(err.Error()))
+	}
 	if len(runs) == 0 {
 		info("%s", cDim("no runs"))
 		return nil
@@ -171,7 +267,6 @@ func interactiveClean(addr string, runs []runEntry) error {
 		}
 	}
 
-	// Build the menu dynamically - only show options that would do something.
 	type choice struct {
 		key, label string
 		filter     func(runEntry) bool
@@ -187,17 +282,18 @@ func interactiveClean(addr string, runs []runEntry) error {
 	}
 	menu = append(menu, choice{"a", fmt.Sprintf("delete everything (%d)", len(runs)), nil})
 
-	fmt.Fprintf(stderr, "\n")
+	fmt.Fprintln(stderr)
 	label("total", fmt.Sprintf("%d runs", len(runs)))
 	label("ended", fmt.Sprintf("%d", ended))
 	label("errors", fmt.Sprintf("%d", errored))
-	fmt.Fprintf(stderr, "\n")
+	fmt.Fprintln(stderr)
 
 	for _, m := range menu {
 		fmt.Fprintf(stderr, "  %s   %s\n", cAqua(cBold("["+m.key+"]")), m.label)
 	}
 	fmt.Fprintf(stderr, "  %s   cancel\n", cAqua(cBold("[q]")))
-	fmt.Fprintf(stderr, "\n  > ")
+	fmt.Fprintln(stderr)
+	fmt.Fprint(stderr, "  > ")
 
 	reader := bufio.NewReader(os.Stdin)
 	input, _ := reader.ReadString('\n')
@@ -206,20 +302,12 @@ func interactiveClean(addr string, runs []runEntry) error {
 	var targets []runEntry
 	switch input {
 	case "e", "ended":
-		if ended == 0 {
-			info("%s", cDim("nothing to clean"))
-			return nil
-		}
 		for _, r := range runs {
 			if !isActive(r.Status) {
 				targets = append(targets, r)
 			}
 		}
 	case "r", "errors":
-		if errored == 0 {
-			info("%s", cDim("nothing to clean"))
-			return nil
-		}
 		for _, r := range runs {
 			if r.Status == "error" {
 				targets = append(targets, r)
@@ -232,20 +320,50 @@ func interactiveClean(addr string, runs []runEntry) error {
 		return nil
 	}
 
+	if len(targets) == 0 {
+		info("%s", cDim("nothing to delete"))
+		return nil
+	}
+
+	// Kill tmux backings first (dedup by session) so we don't leak panes.
+	killedSessions := map[string]struct{}{}
+	for _, r := range targets {
+		session := r.Name
+		if r.Run != "" {
+			session = r.Run
+		}
+		if _, done := killedSessions[session]; done {
+			continue
+		}
+		if exec.Command("tmux", "has-session", "-t", session).Run() == nil {
+			exec.Command("tmux", "kill-session", "-t", session).Run()
+			killedSessions[session] = struct{}{}
+		}
+	}
+
 	deleted := 0
 	for _, r := range targets {
-		if err := deleteRun(addr, r.Name); err == nil {
+		if err := deleteRun(addr, r.Name, tokenVar); err == nil {
 			deleted++
 		}
 	}
-	ok("%s %d run(s)", cGreen("deleted"), deleted)
+	ok("%s %d %s", cGreen("deleted"), deleted, pluralize("run", deleted))
 	return nil
 }
 
-func deleteRun(addr, name string) error {
+// deleteRun issues a DELETE against the server's /api/run/<name>. If
+// tokenVar names an env var with a non-empty value, an Authorization
+// header is attached (Bearer <value>). Tokenless calls are best-effort
+// and rely on the server being in open mode (SPOUT_TOKEN unset).
+func deleteRun(addr, name, tokenVar string) error {
 	req, err := http.NewRequest("DELETE", "http://"+addr+"/api/run/"+name, nil)
 	if err != nil {
 		return err
+	}
+	if tokenVar != "" {
+		if v := os.Getenv(tokenVar); v != "" {
+			req.Header.Set("Authorization", "Bearer "+v)
+		}
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -283,14 +401,12 @@ func parseDuration(s string) (time.Duration, error) {
 }
 
 func init() {
-	cleanCmd.Flags().BoolVar(&cleanAll, "all", false, "delete everything")
-	cleanCmd.Flags().BoolVar(&cleanEnded, "ended", false, "delete all ended runs")
-	cleanCmd.Flags().BoolVar(&cleanErrors, "errors", false, "delete errored runs")
-	cleanCmd.Flags().StringVar(&cleanOlder, "older", "", "delete runs older than duration (e.g. 7d)")
-	cleanCmd.Flags().IntVar(&cleanKeep, "keep", 0, "keep last N runs, delete the rest")
-	cleanCmd.Flags().BoolVarP(&cleanForce, "yes", "y", false, "skip confirmation")
+	deleteCmd.Flags().BoolVarP(&rmAll, "all", "a", false, "every run")
+	deleteCmd.Flags().BoolVarP(&rmEnded, "ended", "e", false, "every ended run")
+	deleteCmd.Flags().BoolVar(&rmErrors, "errors", false, "every errored run")
+	deleteCmd.Flags().StringVar(&rmOlder, "older", "", "older than (30m/24h/7d/2w)")
+	deleteCmd.Flags().IntVar(&rmKeep, "keep", 0, "keep newest N, delete rest")
+	deleteCmd.Flags().BoolVarP(&rmForce, "yes", "y", false, "skip confirmation")
 	deleteCmd.GroupID = groupSession
-	cleanCmd.GroupID = groupSession
 	rootCmd.AddCommand(deleteCmd)
-	rootCmd.AddCommand(cleanCmd)
 }

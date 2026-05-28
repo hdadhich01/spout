@@ -7,8 +7,12 @@
 # Fallback server when no project config specifies one.
 default_server: spout.sh
 
-# Where the CLI locally archives .raw stream files (all tiers).
-# storage: ~/.config/spout/storage
+# CLI's canonical local copy — every byte of every run is written
+# here, independent of any server. Default: ~/.spout/local.
+# local: ~/.spout/local
+
+# Server's data dir (used by `spout server`). Default: ~/.spout/server.
+# storage: ~/.spout/server
 
 # Persist .raw files locally? Set false for CI/CD.
 # history: true
@@ -30,3 +34,26 @@ default_server: spout.sh
 # And in ~/.config/spout/.env:
 #   SPOUT_TOKEN_WORK=alice-secret-token
 # servers:
+
+# ──────────────────────────────────────────────────────────────
+# OBSERVE — opt-in LLM observability (off by default)
+#
+# When enabled, a CLI-side loop watches each run's output and emits
+# structured events (live status, metrics, an end-of-run synthesis, and
+# built-in loop/drift/amnesia detectors for agents). Events are written
+# to the local copy and shown on the run's dashboard page.
+#
+# The API key is read from ANTHROPIC_API_KEY by default (put it in
+# ~/.config/spout/.env). Per-run overrides: --observe / --no-observe.
+# Privacy: type: api sends output to the model provider — use
+# type: local or cli to keep everything on-box (e.g. Tier-2 runs).
+#
+# observe:
+#   enabled: true
+#   default_interval: 60s
+#   model:
+#     type: api               # api | local | cli
+#     model: claude-haiku-4-5
+#     # token: ANTHROPIC_API_KEY
+#     # endpoint: http://localhost:11434   # when type: local
+#   # otel: http://localhost:4318          # also export events as OTLP spans

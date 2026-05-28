@@ -46,13 +46,13 @@ var serverCmd = &cobra.Command{
 		dir := config.DefaultStorageDir()
 		st, err := store.New(dir)
 		if err != nil {
-			return fmt.Errorf("opening session store: %w", err)
+			return fmt.Errorf("opening run store: %w", err)
 		}
 
 		banner()
 		fmt.Fprintf(stderr, "\n")
 		label("listen", cAqua("http://localhost:"+serverPort))
-		label("store", cDim(dir))
+		label("storage", cDim(shortPath(dir)))
 		label("runs", fmt.Sprintf("%d loaded", len(st.List())))
 		fmt.Fprintf(stderr, "\n")
 

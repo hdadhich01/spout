@@ -13,13 +13,9 @@ import (
 var configCmd = &cobra.Command{
 	Use:   "config",
 	Short: "Show resolved config",
-	Long: `Show what files are loaded and what they resolve to.
+	Long: `Show which spout.yaml files are loaded and what they resolve to. Use 'spout login' or 'spout init' to create configs.
 
-  spout config
-
-To create or edit configs:
-  spout login            edit ~/.config/spout/spout.yaml
-  spout init             create a spout.yaml in the current directory`,
+  spout config`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg := config.Load()
 		addr, token := cfg.Resolve(serverAddr)
@@ -167,22 +163,20 @@ To create or edit configs:
 		if cfg.RunName != "" {
 			label("run_name", cfg.RunName)
 		}
-		if cfg.Storage != "" {
-			label("storage", cAqua(shortPath(cfg.Storage)))
-		}
+		// Show only the local (CLI canonical) path. The server's storage
+		// dir is intentionally omitted from CLI surfaces — it's a server
+		// concern, surfaced by `spout server` when you start one.
+		label("local", cAqua(shortPath(cfg.ResolveLocal())))
 		if cfg.History != nil {
 			label("history", fmt.Sprintf("%t", *cfg.History))
 		}
-		if cfg.Watch != nil {
-			rules := 0
-			if cfg.Watch.Rules != nil {
-				rules = len(cfg.Watch.Rules)
-			}
+		if cfg.Observe != nil {
+			rules := len(cfg.Observe.Rules)
 			state := cDim("off")
-			if cfg.Watch.Enabled {
+			if cfg.Observe.Enabled {
 				state = cGreen("on")
 			}
-			label("watch", fmt.Sprintf("%s  %d rule(s)", state, rules))
+			label("observe", fmt.Sprintf("%s  %s  %d rule(s)", state, cfg.Observe.ModelType(), rules))
 		}
 
 		// --- streams: one section with column-aligned labels ---

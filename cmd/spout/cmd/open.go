@@ -9,20 +9,38 @@ import (
 )
 
 var openCmd = &cobra.Command{
-	Use:               "open <name>",
-	Short:             "Open a run in the browser",
-	Long: `Open a run's dashboard URL in the default browser.
+	Use:   "open [run] [stream]",
+	Short: "Open a run in the browser",
+	Long: `Open a run's dashboard URL in your browser.
 
+  spout open
   spout open ember
-  spout open ember-k9p1`,
-	Args:              cobra.ExactArgs(1),
+  spout open exp-2/training`,
+	Args:              cobra.RangeArgs(0, 2),
 	ValidArgsFunction: completeTmuxSessions,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		addr, found := findRunServer(args[0])
-		if !found {
-			warn("run %s %s on %s", cBold(args[0]), cYellow("not found"), cAqua(addr))
+		var t target
+		if len(args) == 0 {
+			addr, _ := resolveServer()
+			var err error
+			t, err = pickRun(addr, "open", nil)
+			if err != nil {
+				return err
+			}
+		} else {
+			targets, err := resolveTargets(args, true)
+			if err != nil {
+				return err
+			}
+			t = targets[0]
 		}
-		url := fmt.Sprintf("http://%s/r/%s", addr, args[0])
+		// For a group, open the run's parent page if we had one; for now
+		// open the first stream so the dashboard at least loads something.
+		name := t.Name
+		if t.Kind == targetGroup {
+			name = t.Entry.Name
+		}
+		url := fmt.Sprintf("http://%s/r/%s", t.Addr, name)
 		if err := openBrowser(url); err != nil {
 			return fmt.Errorf("opening browser: %w", err)
 		}

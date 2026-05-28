@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -41,6 +42,7 @@ var streamCmd = &cobra.Command{
 		}()
 
 		addr, _ := resolveServer()
+		tokenVar := resolveServerTokenVar()
 
 		// Watch pane bytes in-band: keep a local copy of HasExit / last-byte
 		// time so the watchdog doesn't have to round-trip to the server.
@@ -81,9 +83,9 @@ var streamCmd = &cobra.Command{
 			}
 		}()
 
-		_, err := streamToSession(ctx, r, addr, streamSession, "run", streamCmd_)
-		if err != nil {
-			return fmt.Errorf("streaming session %s: %w", streamSession, err)
+		_, err := streamToSession(ctx, r, addr, tokenVar, streamSession, "run", streamCmd_)
+		if err != nil && !errors.Is(err, errInterrupted) {
+			return fmt.Errorf("streaming %s: %w", streamSession, err)
 		}
 		return nil
 	},

@@ -12,19 +12,9 @@ import (
 var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Create a spout.yaml here",
-	Long: `Create a spout.yaml in the current directory from the project template.
+	Long: `Create a spout.yaml in the current directory. Walk-up discovery picks the deepest one. Safe to commit — tokens go in .env.
 
-All spout config files use the same name (spout.yaml) and the same
-schema. The global one lives at ~/.config/spout/spout.yaml. Project
-ones live in any directory and walk up from cwd to the git root.
-Deeper files override upper layers.
-
-  spout init
-
-The template source is internal/config/templates/project.yaml in the
-spout repo - edit it there to change what this command writes.
-
-Safe to commit to git - tokens go in .env (next to the yaml).`,
+  spout init`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		path := filepath.Join(".", "spout.yaml")
 		if _, err := os.Stat(path); err == nil {

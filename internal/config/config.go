@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
@@ -21,6 +22,11 @@ type Config struct {
 	RunName       string `yaml:"run_name,omitempty"`
 
 	// Storage (scalar, override; typically global-only).
+	// `local:` is the CLI's canonical local copy (`~/.spout/local/` by
+	// default). `storage:` is the server's data dir (`~/.spout/server/`
+	// by default). They MUST be different paths even when colocated —
+	// see ARCHITECTURE.md §2 (local copy is canonical).
+	Local   string `yaml:"local,omitempty"`
 	Storage string `yaml:"storage,omitempty"`
 	History *bool  `yaml:"history,omitempty"` // pointer so "unset" != "false"
 
@@ -30,8 +36,13 @@ type Config struct {
 	// Execution blueprint (list, replace).
 	Streams []Stream `yaml:"streams,omitempty"`
 
-	// Watchdog (object, merged field-by-field; Rules list replaces).
-	Watch *Watch `yaml:"watch,omitempty"`
+	// Observability (object, merged field-by-field; Rules list replaces).
+	Observe *Observe `yaml:"observe,omitempty"`
+
+	// Deprecated: renamed to `observe`. Parsed only so a leftover `watch:`
+	// block migrates forward (with a one-time warning) instead of silently
+	// vanishing. Promoted into Observe by Load; never used directly.
+	Watch *Observe `yaml:"watch,omitempty"`
 
 	// sourceFile tracks which yaml file this Config was parsed from, so
 	// stream-relative `dir:` values can later be resolved to absolute paths.
@@ -63,27 +74,102 @@ type Stream struct {
 	SourceFile string `yaml:"-"`
 }
 
-// Watch is the LLM-powered monitoring subsystem. Currently parsed + validated
-// but not executed (see docs/roadmap.md).
-type Watch struct {
-	Enabled         bool        `yaml:"enabled,omitempty"`
-	DefaultInterval string      `yaml:"default_interval,omitempty"`
-	Model           *WatchModel `yaml:"model,omitempty"`
-	Rules           []WatchRule `yaml:"rules,omitempty"`
+// Observe is the LLM-powered observability subsystem: a CLI-side loop that
+// periodically feeds recent output to a model and emits structured events
+// (status, metrics, synthesis, and built-in agent-failure detectors). One
+// engine, many consumers — see internal/observe and ARCHITECTURE.md.
+type Observe struct {
+	Enabled         bool              `yaml:"enabled,omitempty"`
+	DefaultInterval string            `yaml:"default_interval,omitempty"` // fallback poll cadence
+	Model           *ObserveModel     `yaml:"model,omitempty"`
+	Detectors       *ObserveDetectors `yaml:"detectors,omitempty"`
+	Rules           []ObserveRule     `yaml:"rules,omitempty"`
+	OTel            string            `yaml:"otel,omitempty"` // OTLP/HTTP endpoint to also export events to
 }
 
-// WatchModel identifies the backing LLM for the watchdog.
-type WatchModel struct {
-	Type     string `yaml:"type,omitempty"`     // "local" | "api" | "cli"
+// ObserveModel identifies the backing LLM for the observer.
+type ObserveModel struct {
+	Type     string `yaml:"type,omitempty"`     // "api" | "local" | "cli" (default api)
 	Endpoint string `yaml:"endpoint,omitempty"` // required when type=local
+	Model    string `yaml:"model,omitempty"`    // model id (default DefaultObserveModelID)
+	Token    string `yaml:"token,omitempty"`    // env-var NAME holding the API key, not the value
 }
 
-// WatchRule is one monitoring loop.
-type WatchRule struct {
+// ObserveDetectors toggles the built-in, zero-config detectors. Pointers so
+// an unset field inherits the default (on while observe is enabled) rather
+// than reading as an explicit false.
+type ObserveDetectors struct {
+	Classify *bool `yaml:"classify,omitempty"` // auto-detect run type
+	Loop     *bool `yaml:"loop,omitempty"`     // repeated identical failure/attempt
+	Drift    *bool `yaml:"drift,omitempty"`    // agent diverging from stated intent
+	Amnesia  *bool `yaml:"amnesia,omitempty"`  // re-asking / re-doing / constraint drop
+}
+
+// ObserveRule is one user-defined prompt folded into the observer's single
+// LLM call. `sources` (optional) must match Stream labels when set.
+type ObserveRule struct {
 	Name     string   `yaml:"name"`
 	Prompt   string   `yaml:"prompt"`
 	Interval string   `yaml:"interval,omitempty"`
-	Sources  []string `yaml:"sources"` // must match Stream labels
+	Sources  []string `yaml:"sources,omitempty"`
+}
+
+// ModelType returns the resolved backing-LLM kind, defaulting to api.
+func (o *Observe) ModelType() string {
+	if o == nil || o.Model == nil || o.Model.Type == "" {
+		return DefaultObserveModelType
+	}
+	return o.Model.Type
+}
+
+// ModelID returns the resolved model identifier (only meaningful for api).
+func (o *Observe) ModelID() string {
+	if o == nil || o.Model == nil || o.Model.Model == "" {
+		return DefaultObserveModelID
+	}
+	return o.Model.Model
+}
+
+// Endpoint returns the resolved local-model endpoint.
+func (o *Observe) Endpoint() string {
+	if o == nil || o.Model == nil || o.Model.Endpoint == "" {
+		return DefaultObserveEndpoint
+	}
+	return o.Model.Endpoint
+}
+
+// APIKey resolves the provider API key from the named env var, falling back
+// to the Anthropic SDK's own default var so dev needs no extra config.
+func (o *Observe) APIKey() string {
+	v := DefaultObserveTokenVar
+	if o != nil && o.Model != nil && o.Model.Token != "" {
+		v = o.Model.Token
+	}
+	return os.Getenv(v)
+}
+
+// Detector reports whether a named built-in detector is active. Unset
+// detectors default on while observe is enabled.
+func (o *Observe) Detector(name string) bool {
+	if o == nil || !o.Enabled {
+		return false
+	}
+	d := o.Detectors
+	on := func(p *bool) bool { return p == nil || *p }
+	if d == nil {
+		return true
+	}
+	switch name {
+	case "classify":
+		return on(d.Classify)
+	case "loop":
+		return on(d.Loop)
+	case "drift":
+		return on(d.Drift)
+	case "amnesia":
+		return on(d.Amnesia)
+	}
+	return false
 }
 
 // Load reads every spout.yaml on the walk-up path plus the global file, then
@@ -95,29 +181,50 @@ func Load() Config {
 	proj := loadProjectConfigs()
 	cfg := merge(sys, proj)
 	loadEnvTokens(&cfg)
+	cfg.resolveLegacyWatch()
 	return cfg
 }
 
-// Validate checks invariants that can't be expressed in the struct alone.
-// Currently enforces foreign-key integrity between watch.rules and streams.
-// Returns nil if the config is valid or if there's nothing to validate.
+var warnLegacyWatch sync.Once
+
+// resolveLegacyWatch promotes a deprecated `watch:` block into `observe:`
+// (observe wins if both are present) and warns once per process. The
+// watchdog never executed under its old name, so this is a clean rename
+// with a courtesy nudge rather than a behavioral migration.
+func (c *Config) resolveLegacyWatch() {
+	if c.Watch == nil {
+		return
+	}
+	warnLegacyWatch.Do(func() {
+		fmt.Fprintln(os.Stderr, "spout: `watch:` in spout.yaml is deprecated — rename it to `observe:`")
+	})
+	if c.Observe == nil {
+		c.Observe = c.Watch
+	}
+	c.Watch = nil
+}
+
+// Validate checks invariants that can't be expressed in the struct alone:
+// foreign-key integrity between observe.rules and streams, and that a
+// local model names its endpoint. Returns nil when there's nothing to check.
 func (c Config) Validate() error {
-	if c.Watch == nil || len(c.Watch.Rules) == 0 {
+	o := c.Observe
+	if o == nil {
 		return nil
 	}
 	labels := make(map[string]struct{}, len(c.Streams))
 	for _, s := range c.Streams {
 		labels[s.Label] = struct{}{}
 	}
-	for _, r := range c.Watch.Rules {
+	for _, r := range o.Rules {
 		for _, src := range r.Sources {
 			if _, ok := labels[src]; !ok {
-				return fmt.Errorf("watch rule %q references unknown stream %q (define it under streams:)", r.Name, src)
+				return fmt.Errorf("observe rule %q references unknown stream %q (define it under streams:)", r.Name, src)
 			}
 		}
 	}
-	if c.Watch.Model != nil && c.Watch.Model.Type == "local" && c.Watch.Model.Endpoint == "" {
-		return fmt.Errorf("watch.model.type=local requires watch.model.endpoint")
+	if o.Model != nil && o.Model.Type == "local" && o.Model.Endpoint == "" {
+		return fmt.Errorf("observe.model.type=local requires observe.model.endpoint")
 	}
 	return nil
 }
@@ -197,6 +304,45 @@ func resolveTokenForServer(srv Server) string {
 		return ""
 	}
 	return os.Getenv(srv.Token)
+}
+
+// ResolvedProfile returns the profile NAME selected for cliFlag using the
+// same priority ladder as Resolve (cliFlag > ServerRef > DefaultServer),
+// or "" if the resolved input is a raw host:port not in the address book.
+// Used to look up the env-var name for the auth token without exposing
+// the secret value (which Resolve already returns).
+func (c Config) ResolvedProfile(cliFlag string) string {
+	input := cliFlag
+	if input == "" {
+		input = c.ServerRef
+	}
+	if input == "" {
+		input = c.DefaultServer
+	}
+	if input == "" {
+		return ""
+	}
+	if _, ok := c.Servers[input]; ok {
+		return input
+	}
+	return ""
+}
+
+// ResolveLocal returns the CLI's local-copy directory: cfg.Local when
+// set (with leading ~ expanded to $HOME), otherwise DefaultLocalDir().
+// The CLI's local copy is intentionally separate from the server's
+// storage dir — see ARCHITECTURE.md §2.
+func (c Config) ResolveLocal() string {
+	if c.Local == "" {
+		return DefaultLocalDir()
+	}
+	p := c.Local
+	if strings.HasPrefix(p, "~") {
+		if home, err := os.UserHomeDir(); err == nil {
+			p = filepath.Join(home, strings.TrimPrefix(p, "~"))
+		}
+	}
+	return p
 }
 
 // TokenVarFor returns the env-var name a profile reads its token from,
@@ -302,8 +448,8 @@ func migrateLegacy() {
 // merge folds a project config onto a system/base config.
 // Merge semantics per docs/config.md:
 //
-//	Map     -> MERGE, deepest per key      (servers, watch sub-scalars)
-//	List    -> REPLACE, deepest wins       (streams, watch.rules)
+//	Map     -> MERGE, deepest per key      (servers, observe sub-scalars)
+//	List    -> REPLACE, deepest wins       (streams, observe.rules)
 //	Scalar  -> OVERRIDE, deepest wins      (server, job, run_name, ...)
 //
 // `proj` is closer to cwd than `sys`, so proj wins.
@@ -322,6 +468,9 @@ func merge(sys, proj Config) Config {
 	}
 	if proj.RunName != "" {
 		out.RunName = proj.RunName
+	}
+	if proj.Local != "" {
+		out.Local = proj.Local
 	}
 	if proj.Storage != "" {
 		out.Storage = proj.Storage
@@ -345,33 +494,69 @@ func merge(sys, proj Config) Config {
 		out.Streams = proj.Streams
 	}
 
-	// Watch - object merge. Sub-scalars override; Rules list replaces.
-	if proj.Watch != nil {
-		if out.Watch == nil {
-			out.Watch = &Watch{}
+	// Observe - object merge. Sub-scalars override; Rules list replaces.
+	// The deprecated `watch:` alias merges the same way (promoted in Load).
+	out.Observe = mergeObserve(out.Observe, proj.Observe)
+	out.Watch = mergeObserve(out.Watch, proj.Watch)
+
+	return out
+}
+
+// mergeObserve folds a project Observe block onto a base one: scalars and
+// model/detector sub-fields override when set, Rules replace when non-empty.
+func mergeObserve(out, proj *Observe) *Observe {
+	if proj == nil {
+		return out
+	}
+	if out == nil {
+		out = &Observe{}
+	}
+	if proj.Enabled {
+		out.Enabled = true
+	}
+	if proj.DefaultInterval != "" {
+		out.DefaultInterval = proj.DefaultInterval
+	}
+	if proj.OTel != "" {
+		out.OTel = proj.OTel
+	}
+	if proj.Model != nil {
+		if out.Model == nil {
+			out.Model = &ObserveModel{}
 		}
-		if proj.Watch.Enabled {
-			out.Watch.Enabled = true
+		if proj.Model.Type != "" {
+			out.Model.Type = proj.Model.Type
 		}
-		if proj.Watch.DefaultInterval != "" {
-			out.Watch.DefaultInterval = proj.Watch.DefaultInterval
+		if proj.Model.Endpoint != "" {
+			out.Model.Endpoint = proj.Model.Endpoint
 		}
-		if proj.Watch.Model != nil {
-			if out.Watch.Model == nil {
-				out.Watch.Model = &WatchModel{}
-			}
-			if proj.Watch.Model.Type != "" {
-				out.Watch.Model.Type = proj.Watch.Model.Type
-			}
-			if proj.Watch.Model.Endpoint != "" {
-				out.Watch.Model.Endpoint = proj.Watch.Model.Endpoint
-			}
+		if proj.Model.Model != "" {
+			out.Model.Model = proj.Model.Model
 		}
-		if len(proj.Watch.Rules) > 0 {
-			out.Watch.Rules = proj.Watch.Rules
+		if proj.Model.Token != "" {
+			out.Model.Token = proj.Model.Token
 		}
 	}
-
+	if proj.Detectors != nil {
+		if out.Detectors == nil {
+			out.Detectors = &ObserveDetectors{}
+		}
+		if proj.Detectors.Classify != nil {
+			out.Detectors.Classify = proj.Detectors.Classify
+		}
+		if proj.Detectors.Loop != nil {
+			out.Detectors.Loop = proj.Detectors.Loop
+		}
+		if proj.Detectors.Drift != nil {
+			out.Detectors.Drift = proj.Detectors.Drift
+		}
+		if proj.Detectors.Amnesia != nil {
+			out.Detectors.Amnesia = proj.Detectors.Amnesia
+		}
+	}
+	if len(proj.Rules) > 0 {
+		out.Rules = proj.Rules
+	}
 	return out
 }
 
@@ -431,9 +616,11 @@ func isEmpty(c Config) bool {
 		c.Job == "" &&
 		c.RunName == "" &&
 		c.Storage == "" &&
+		c.Local == "" &&
 		c.History == nil &&
 		len(c.Servers) == 0 &&
 		len(c.Streams) == 0 &&
+		c.Observe == nil &&
 		c.Watch == nil
 }
 

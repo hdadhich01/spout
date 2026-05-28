@@ -10,10 +10,7 @@ var lsCmd = &cobra.Command{
 	Use:     "ls",
 	Aliases: []string{"list", "history"},
 	Short:   "Browse all runs and stats",
-	Long: `List all runs from the server, grouped by status.
-
-Same format as bare 'spout' but shows everything (no max).
-Long lists open in a scrollable pager (less) automatically.
+	Long: `List all runs from the server. Long lists open in a pager.
 
   spout ls
   spout list

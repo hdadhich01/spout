@@ -13,10 +13,10 @@ import (
 var loginCmd = &cobra.Command{
 	Use:   "login [profile]",
 	Short: "Add or update a server profile",
-	Long: `Interactively configure a server profile with URL and token.
+	Long: `Configure a server profile (URL + optional token).
 
-  spout login work       # create/update the "work" profile
-  spout login            # create/update the default server`,
+  spout login            # default server
+  spout login work       # the "work" profile`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		profile := ""
